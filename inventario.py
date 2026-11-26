@@ -605,6 +605,8 @@ def _advance_preparation(db,user,p):
     if action not in transitions:
         raise ValueError("Etapa de preparación inválida.")
     before,after,column=transitions[action]
+    if action=="entregar" and task["status"] in ("En cola","Preparando","Listo"):
+        before=task["status"]
     if task["status"]!=before:
         raise ValueError(f"Este producto debe estar en estado {before} antes de avanzar.")
     if o["status"]!="Reservado" or _pending_cancel(db,o["id"]):

@@ -76,10 +76,14 @@ class TestAtencionV4(unittest.TestCase):
         with self.assertRaises(PermissionError):
             inv._advance_preparation(db,COOK,{'id':1,'product_id':8,'step':'preparar'})
         self.assertFalse(any('update inv_dispatch' in q.lower() for q,_ in db.statements))
-    def test_preparation_out_of_order_is_rejected(self):
-        db=Stub(task={'area':'Cocina','status':'En cola'})
-        with self.assertRaisesRegex(ValueError,'Listo'):
-            inv._advance_preparation(db,COOK,{'id':1,'product_id':8,'step':'entregar'})
+    def test_direct_delivery_from_each_pending_status(self):
+        for status in ("En cola","Preparando","Listo"):
+            with self.subTest(status=status):
+                db=Stub(task={"area":"Cocina","status":status})
+                result=inv._advance_preparation(db,COOK,{"id":1,"product_id":8,"step":"entregar"})
+                self.assertEqual(result["estado"],"Entregado")
+                update=next(args for sql,args in db.statements if sql.startswith("UPDATE inv_dispatch"))
+                self.assertEqual(update[-1],status)
     def test_no_payment_before_delivery(self):
         db=Stub(delivered=0)
         with self.assertRaisesRegex(ValueError,'entregados'):

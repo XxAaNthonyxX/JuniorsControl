@@ -27,6 +27,11 @@
       prune();
     }
   }
+  function sharedAreaNotice(item) {
+    const baseId=item.base_id||item.id;
+    const sharesStock=baseId!=null&&S.items.some(other=>other.base_id===baseId);
+    return sharesStock?'<p class="muted">El cambio de área se aplica también a las presentaciones que comparten este stock.</p>':'';
+  }
   function formItem(i = {}) {
     const lists = `<datalist id="inv-areas">${S.areas.map(v=>option(v,v,'')).join('')}</datalist>
       <datalist id="inv-categories">${S.categories.map(v=>option(v,v,'')).join('')}</datalist>`;
@@ -37,6 +42,7 @@
       input('name','Nombre del insumo','text',i.name || '','required maxlength="100"') +
       input('unit','Unidad de medida','text',i.unit || '','required maxlength="20" placeholder="kg, L, und…"') +
       input('area','Área responsable','text',i.area || '','required maxlength="60" list="inv-areas"') +
+      sharedAreaNotice(i) +
       input('category','Categoría','text',i.category || '','required maxlength="60" list="inv-categories"') +
       input('min_qty','Cantidad mínima','number',i.min_qty ?? 0,'required min="0" step="0.001"') +
       input('warn_days','Avisar días antes de vencer','number',i.warn_days ?? 3,'required min="0" max="3650" step="1"') +
@@ -76,14 +82,20 @@
     form.addEventListener('change',update);
     update();
   }
-  function formItemCategory(i) {
-    const categories=[...new Set([...S.categories,i.category])].sort((a,b)=>a.localeCompare(b,'es'));
-    const fields=select('category','Categoría',asOptions(categories),i.category)+
+  function formItemClassification(i) {
+    const fields=select('category','Categoría',asOptions(S.categories),i.category)+
       input('new_category','Nueva categoría (opcional)','text','','maxlength="60"')+
-      '<p class="muted">Selecciona una categoría existente o escribe una nueva para asignarla al insumo.</p>';
-    modal(`Cambiar categoría · ${i.code} · ${i.name}`,fields,values=>run('inv.item_category',{
-      id:i.id,category:values.new_category.trim()||values.category
-    },'Categoría del insumo actualizada'),'Guardar categoría');
+      select('area','Área responsable',asOptions(S.areas),i.area)+
+      input('new_area','Nueva área (opcional)','text','','maxlength="60"')+
+      sharedAreaNotice(i);
+    modal(`Cambiar categoría o área · ${i.code} · ${i.name}`,fields,values=>{
+      const category=values.new_category.trim()||values.category;
+      const area=values.new_area.trim()||values.area;
+      const changes={id:i.id};
+      if(category!==i.category)changes.category=category;
+      if(area!==i.area)changes.area=area;
+      return run('inv.item_category',changes,'Insumo actualizado');
+    });
   }
   function formUse(i) {
     const field = input('qty',`Cantidad a consumir (${i.unit})`,'number','','required min="0.001" step="0.001" max="'+Number(i.available)+'"') +
@@ -106,11 +118,13 @@
       (!selectedItem || String(i.id)===selectedItem)).map(i=>[
         h(i.code),`<strong>${h(i.name)}</strong><br><small class="muted">${h(i.category)}${i.base_id?` · ${i.factor} cuartos por unidad<br>Stock compartido con ${h(i.base_code)} · ${fmt(i.remaining_portions)} cuartos restantes<br>Físico incluye unidades empezadas. Disponible cuenta unidades completas`:""}</small>`,h(i.area),`${fmt(i.physical)} ${h(i.unit)}`,fmt(i.reserved),`<strong>${fmt(i.available)}</strong>`,
         badge(i.available===0 ? 'Agotado' : i.available<=i.min_qty ? 'Stock bajo' : 'Disponible'),
-        (isAdmin()?button('Editar',()=>formItem(i),'secondary')+button('Cambiar categoría',()=>formItemCategory(i),'secondary'):'')+button('Ver lotes',()=>{ detail=i.id; refreshPanel(); document.getElementById('inventory-detail')?.scrollIntoView({block:'nearest'}); })
+        (isAdmin()?button('Editar',()=>formItem(i),'secondary')+button('Cambiar categoría o área',()=>formItemClassification(i),'secondary'):'')+button('Ver lotes',()=>{ detail=i.id; refreshPanel(); document.getElementById('inventory-detail')?.scrollIntoView({block:'nearest'}); })
       ]);
     return table(['Código','Insumo','Área','Físico','Reservado','Disponible','Estado','Acciones'],rows,'No hay insumos que coincidan con los filtros.');
   }
   function stockPanel() {
+    if(!S.areas.includes(area))area='';
+    if(!S.categories.includes(category))category='';
     const filter = `<div class="actions" style="flex-wrap:wrap;margin-bottom:16px">
       <label class="field">Buscar insumo<select id="inv-search">${option('','Todos los insumos',selectedItem)}${S.items.map(i=>option(i.id,`${i.code} · ${i.name}`,selectedItem)).join('')}</select></label>
       <label class="field">Área<select id="inv-area">${option('','Todas las áreas',area)}${S.areas.map(v=>option(v,v,area)).join('')}</select></label>

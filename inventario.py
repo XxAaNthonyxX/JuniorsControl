@@ -239,6 +239,15 @@ def _next_item_code(db,number):
     return code
 
 
+def _set_item_area(db, item, area):
+    if area == item["area"]:
+        return
+    base_id, _ = porciones.resolve(db, item["id"], 0)
+    db.execute("""UPDATE inv_items SET area=? WHERE id=? OR id IN
+                  (SELECT item_id FROM inv_stock_equivalents WHERE base_id=?)""",
+               (area, base_id, base_id))
+
+
 def _save_item(db, user, p):
     _role(user, "admin")
     fields = [_text(p.get(k), k, limit) for k, limit in
@@ -248,8 +257,8 @@ def _save_item(db, user, p):
                _bool(p.get("perishable")), _bool(p.get("transformable"))]
     item=_item(db,p["id"]) if p.get("id") else None
     if item and db.execute("SELECT 1 FROM inv_stock_equivalents WHERE item_id=? OR base_id=?",(item["id"],item["id"])).fetchone():
-        if (fields[2],fields[3],fields[6])!=(item["area"],item["unit"],item["perishable"]):
-            raise ValueError("El stock compartido debe conservar su área, unidad y tipo de vencimiento.")
+        if (fields[3],fields[6])!=(item["unit"],item["perishable"]):
+            raise ValueError("El stock compartido debe conservar su unidad y tipo de vencimiento.")
     code=p.get("code")
     if code:
         code=_text(code,"código",32)
@@ -265,8 +274,10 @@ def _save_item(db, user, p):
             (item["id"],)*4).fetchone():
             raise ValueError("El insumo tiene lotes o recetas. Conserva su unidad y tipo de vencimiento.")
         code=code or item["code"]
-        db.execute("UPDATE inv_items SET code=?,name=?,category=?,area=?,unit=?,min_qty=?,warn_days=?,perishable=?,transformable=? WHERE id=?",
-                   (code,*fields,item["id"]))
+        name, category, area, unit, min_qty, warn_days, perishable, transformable = fields
+        db.execute("UPDATE inv_items SET code=?,name=?,category=?,unit=?,min_qty=?,warn_days=?,perishable=?,transformable=? WHERE id=?",
+                   (code, name, category, unit, min_qty, warn_days, perishable, transformable, item["id"]))
+        _set_item_area(db, item, area)
         saved_id=item["id"]
     else:
         saved_id=db.execute("SELECT COALESCE(MAX(id),0)+1 FROM inv_items").fetchone()[0]
@@ -290,9 +301,12 @@ def _save_item(db, user, p):
 def _item_category(db,user,p):
     _role(user,"admin")
     item=_item(db,p.get("id"))
-    category=_text(p.get("category"),"categoría",60)
-    db.execute("UPDATE inv_items SET category=? WHERE id=?",(category,item["id"]))
-    return {"id":item["id"],"category":category}
+    category=_text(p["category"],"categoría",60) if "category" in p else item["category"]
+    area=_text(p["area"],"área",60) if "area" in p else item["area"]
+    if category != item["category"]:
+        db.execute("UPDATE inv_items SET category=? WHERE id=?",(category,item["id"]))
+    _set_item_area(db, item, area)
+    return {"id":item["id"],"category":category,"area":area}
 
 
 def _menu_category(db,user,p):

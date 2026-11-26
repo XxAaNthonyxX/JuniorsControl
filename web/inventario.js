@@ -31,7 +31,7 @@
     const lists = `<datalist id="inv-areas">${S.areas.map(v=>option(v,v,'')).join('')}</datalist>
       <datalist id="inv-categories">${S.categories.map(v=>option(v,v,'')).join('')}</datalist>`;
     const suggested=i.code||S.next_item_code;
-    const fields = input('code','Código del insumo','text',suggested,'readonly aria-readonly="true"') +
+    const fields = `<div class="field"><span id="item-code-label">Código del insumo</span><output aria-labelledby="item-code-label" class="notice">${h(suggested)}</output></div>` +
       input('name','Nombre del insumo','text',i.name || '','required maxlength="100"') +
       input('unit','Unidad de medida','text',i.unit || '','required maxlength="20" placeholder="kg, L, und…"') +
       input('area','Área responsable','text',i.area || '','required maxlength="60" list="inv-areas"') +

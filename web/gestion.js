@@ -76,24 +76,34 @@
     const assigned=S.inventory_access_areas;
     const lots=rows("lots").filter(x=>{
       const i=item(x.item_id);
-      return x.physical>0 && i && (admin() || assigned.includes(i.area));
+      return x.available>0 && i && (admin() || assigned.includes(i.area));
     });
-    const options=lots.map(x=>[x.id,`${label("LT",x.id)} · ${item(x.item_id).name} · ${fmt(x.physical)} ${item(x.item_id).unit}`]);
-    modal("Reportar merma",select("lot","Lote afectado",options)+
+    if(!lots.length){
+      toast("No hay lotes con existencias disponibles para reportar una merma.",true);
+      return;
+    }
+    const options=lots.map(x=>[x.id,`${label("LT",x.id)} · ${item(x.item_id).name} · ${fmt(x.available)} ${item(x.item_id).unit} disponibles`]);
+    const dialog=modal("Reportar merma",select("lot","Lote afectado",options)+
       input("qty","Cantidad afectada","number","",qtyAttrs)+
       input("occurred_on","Fecha de la merma","date",S.today,'required max="'+e(S.today)+'"')+
       input("reason","Motivo y detalle del descarte","text","","required maxlength=500")+
-      note("Administración revisará la solicitud antes de descontar las existencias."),
+      note("La cantidad quedará reservada hasta que Administración revise la solicitud."),
       v=>{
         const lot=lots.find(x=>x.id===Number(v.lot));
         if (!lot) throw Error("Selecciona un lote con existencias.");
         return run("gestion.waste",{item_id:lot.item_id,lot_id:lot.id,qty:v.qty,occurred_on:v.occurred_on,reason:v.reason},"Merma reportada");
       },"Enviar a revisión");
+    const form=dialog.querySelector("form");
+    const lotField=form.elements.namedItem("lot");
+    const quantityField=form.elements.namedItem("qty");
+    const updateLimit=()=>{quantityField.max=lots.find(x=>x.id===Number(lotField.value)).available;};
+    lotField.addEventListener("change",updateLimit);
+    updateLimit();
   }
 
   function reviewWaste(x,approve) {
     const verb=approve?"Aprobar":"Rechazar";
-    const effect=approve?"Se descontará la cantidad del lote indicado.":"El saldo del lote se conservará.";
+    const effect=approve?"Se descontará la cantidad de la merma.":"Las reservas de esta merma se liberarán.";
     confirmAction(verb+" "+x.code,fmt(x.qty)+" "+x.unit+" de "+x.item_name+". "+x.reason+". "+effect,
       "review_waste",{id:x.id,approve},verb,approve?"Merma aprobada":"Merma rechazada");
   }

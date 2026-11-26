@@ -160,22 +160,26 @@ def _resolve(db, user, p):
     return issue["id"]
 
 
+def _reserve_waste(db, waste_id, plan):
+    for lot_id, amount, _ in plan:
+        db.execute("UPDATE inv_lots SET reserved=reserved+? WHERE id=?", (amount,lot_id))
+        db.execute("INSERT INTO g_waste_lots(waste_id,lot_id,amount) VALUES(?,?,?)", (waste_id,lot_id,amount))
+
+
+def reserve_pending_wastes(db):
+    pending=db.execute("SELECT id,item_id,qty_m,lot_id FROM g_wastes WHERE status='Pendiente' ORDER BY id").fetchall()
+    for waste in pending:
+        plan=inv._plan(db,waste["item_id"],waste["qty_m"],waste["lot_id"],allow_partial=True)
+        _reserve_waste(db,waste["id"],plan)
+
+
 def _waste(db, user, p):
     _require(user, "admin", "area", "recepcion")
     item = _item(db, p.get("item_id"))
     if not _waste_accessible(user, item["area"]):
         raise PermissionError("El insumo pertenece a otra área.")
     source_id,quantity=inv.porciones.resolve(db,item["id"],inv.qty(p.get("qty")))
-    item=_item(db,source_id)
-    lot_id = p.get("lot_id")
-    if lot_id not in (None,""):
-        lot_id = _int(lot_id, "lote", 1)
-        physical = _one(db,"SELECT physical FROM inv_lots WHERE id=? AND item_id=?",lot_id,item["id"])[0]
-    else:
-        lot_id = None
-        physical = _one(db,"SELECT coalesce(sum(physical),0) FROM inv_lots WHERE item_id=?",item["id"])[0]
-    if quantity > physical:
-        raise ValueError("La cantidad reportada supera las existencias físicas.")
+    lot_id = _int(p["lot_id"], "lote", 1) if p.get("lot_id") not in (None,"") else None
     reason = _text(p.get("reason"), "motivo de la merma", 500)
     at = stamp()
     try:
@@ -184,8 +188,10 @@ def _waste(db, user, p):
         raise ValueError("Introduce una fecha válida para la merma.") from None
     if occurred > at[:10]:
         raise ValueError("La fecha de la merma no puede ser posterior a hoy.")
+    plan=inv._plan(db,source_id,quantity,lot_id)
     cur = db.execute("""INSERT INTO g_wastes(item_id,lot_id,qty_m,reason,created,actor,status,occurred_on) OUTPUT INSERTED.id
-                        VALUES(?,?,?,?,?,?,'Pendiente',?)""", (item["id"],lot_id,quantity,reason,at,user["name"],occurred))
+                        VALUES(?,?,?,?,?,?,'Pendiente',?)""", (source_id,lot_id,quantity,reason,at,user["name"],occurred))
+    _reserve_waste(db,cur.lastrowid,plan)
     return cur.lastrowid
 
 
@@ -195,13 +201,18 @@ def _review_waste(db, user, p):
     if waste["status"] != "Pendiente":
         raise ValueError("La merma ya fue revisada.")
     approve = _flag(p)
-    if approve:
-        if waste["lot_id"]:
-            lot = _one(db,"SELECT physical,reserved FROM inv_lots WHERE id=?",waste["lot_id"])
-            if lot["physical"]>=waste["qty_m"] and lot["physical"]-lot["reserved"]<waste["qty_m"]:
-                raise ValueError("Parte del lote está reservada. Revisa las comandas afectadas y libera la cantidad necesaria antes de aprobar la merma.")
-        inv.withdraw(db,user,waste["item_id"],waste["qty_m"],"Merma: "+waste["reason"],
-                     f"ME{waste['id']:04d}",waste["lot_id"])
+    reserved=db.execute("SELECT lot_id,amount FROM g_waste_lots WHERE waste_id=?", (waste["id"],)).fetchall()
+    reason="Merma: "+waste["reason"]
+    ref=f"ME{waste['id']:04d}"
+    remaining=waste["qty_m"]-sum(part["amount"] for part in reserved)
+    if approve and remaining:
+        inv.withdraw(db,user,waste["item_id"],remaining,reason,ref,waste["lot_id"])
+    for part in reserved:
+        lot_id,amount=part["lot_id"],part["amount"]
+        db.execute("UPDATE inv_lots SET reserved=reserved-? WHERE id=?", (amount,lot_id))
+        if approve:
+            inv._move(db,user,lot_id,-amount,reason,ref)
+    db.execute("DELETE FROM g_waste_lots WHERE waste_id=?", (waste["id"],))
     db.execute("UPDATE g_wastes SET status=?,reviewed_at=?,reviewer=? WHERE id=?",
                ("Aprobada" if approve else "Rechazada",stamp(),user["name"],waste["id"]))
     return waste["id"]

@@ -105,22 +105,23 @@
   function lotsPanel(i) {
     const source=itemById(i.base_id)||i;
     const lots = S.lots.filter(l => Number(l.item_id) === Number(source.id));
-    const lotRows = lots.map(l => [h(l.code),h(l.expiry || 'Sin vencimiento'),fmt(l.physical),fmt(l.reserved),fmt(l.available)]);
+    const lotRows = lots.map(l => [h(l.code),h(l.expiry || 'Sin vencimiento'),fmt(l.reserved),fmt(l.available)]);
     const canConsume = isAdmin() || (['area','atencion','recepcion'].includes(S.user.role) &&
       S.inventory_access_areas.includes(i.area));
     const actions = (canConsume && i.available>0 ? button('Registrar consumo',()=>formUse(i),'primary') : '') +
       (isAdmin() ? button('Editar insumo',()=>formItem(i)) : '') + button('Cerrar',()=>{ detail=null; refreshPanel(); });
     return panel(`Lotes de ${source.name} (${source.unit})`,
-      table(['Lote','Vencimiento','Físico','Reservado','Disponible'],lotRows,'Este insumo aún no tiene lotes con existencias.'),actions);
+      table(['Lote','Vencimiento','Reservado','Disponible'],lotRows,'Este insumo aún no tiene lotes con existencias.'),actions);
   }
   function stockTable() {
     const rows = S.items.filter(i=>(!area || i.area===area) && (!category || i.category===category) &&
       (!selectedItem || String(i.id)===selectedItem)).map(i=>[
-        h(i.code),`<strong>${h(i.name)}</strong><br><small class="muted">${h(i.category)}${i.base_id?` · ${i.factor} cuartos por unidad<br>Stock compartido con ${h(i.base_code)} · ${fmt(i.remaining_portions)} cuartos restantes<br>Físico incluye unidades empezadas. Disponible cuenta unidades completas`:""}</small>`,h(i.area),`${fmt(i.physical)} ${h(i.unit)}`,fmt(i.reserved),`<strong>${fmt(i.available)}</strong>`,
+        h(i.code),`<strong>${h(i.name)}</strong><br><small class="muted">${h(i.category)}${i.base_id?` · ${i.factor} cuartos por unidad<br>Stock compartido con ${h(i.base_code)} · ${fmt(i.available_portions)} cuartos disponibles`:""}</small>`,
+        h(i.area),`${fmt(i.reserved)} ${h(i.unit)}`,`<strong>${fmt(i.available)} ${h(i.unit)}</strong>`,
         badge(i.available===0 ? 'Agotado' : i.available<=i.min_qty ? 'Stock bajo' : 'Disponible'),
         (isAdmin()?button('Editar',()=>formItem(i),'secondary')+button('Cambiar categoría o área',()=>formItemClassification(i),'secondary'):'')+button('Ver lotes',()=>{ detail=i.id; refreshPanel(); document.getElementById('inventory-detail')?.scrollIntoView({block:'nearest'}); })
       ]);
-    return table(['Código','Insumo','Área','Físico','Reservado','Disponible','Estado','Acciones'],rows,'No hay insumos que coincidan con los filtros.');
+    return table(['Código','Insumo','Área','Reservado','Disponible','Estado','Acciones'],rows,'No hay insumos que coincidan con los filtros.');
   }
   function stockPanel() {
     if(!S.areas.includes(area))area='';

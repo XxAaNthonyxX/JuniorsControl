@@ -19,11 +19,11 @@ def project(db, items):
         # El pollo iniciado cuenta hasta consumir su última porción.
         item["physical"]=(physical+factor*1000-1)//(factor*1000)
         item["available"]=available//(factor*1000)
-        item["reserved"]=item["physical"]-(available+factor*1000-1)//(factor*1000)
+        item["reserved"]=base["reserved"]/factor
         item["base_id"]=base["id"]
         item["base_code"]=base["code"]
         item["factor"]=factor
-        item["remaining_portions"]=base["physical"]
+        item["available_portions"]=base["available"]
 
 
 def setup(db,user,p):

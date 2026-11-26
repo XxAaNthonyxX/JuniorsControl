@@ -165,7 +165,7 @@ def receive(db, user, item_id, qty_milli, expiry, reason, ref):
     return lot
 
 
-def _plan(db, item_id, amount, lot_id=None):
+def _plan(db, item_id, amount, lot_id=None, *, allow_partial=False):
     item = _item(db, item_id)
     if not isinstance(amount, int) or amount <= 0:
         raise ValueError("La salida debe ser mayor que cero.")
@@ -184,6 +184,8 @@ def _plan(db, item_id, amount, lot_id=None):
         left -= take
         if not left:
             return result
+    if allow_partial:
+        return result
     raise ValueError(f"Stock insuficiente de {item['name']}. Faltan {num(left):g} {item['unit']}.")
 
 
@@ -220,7 +222,7 @@ def expire(db):
         _release(db, order)
         db.execute("UPDATE inv_orders SET status='Por revisar',version=version+1 WHERE id=?", (order,))
         _event(db, SYSTEM, order, "Por revisar", "Se liberó la reserva por vencimiento de un lote.")
-    expired = db.execute("SELECT id,physical FROM inv_lots WHERE expiry<? AND physical>0", (day,)).fetchall()
+    expired = db.execute("SELECT id,physical-reserved FROM inv_lots WHERE expiry<? AND physical>reserved", (day,)).fetchall()
     for lot, balance in expired:
         _move(db, SYSTEM, lot, -balance, "Caducidad", public("LT",lot))
 

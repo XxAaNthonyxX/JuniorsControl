@@ -124,6 +124,13 @@ def _aplicar_v4(db):
             db.execute(batch)
 
 
+def _aplicar_v14(db):
+    from gestion import reserve_pending_wastes
+
+    db.execute((ROOT/"sql/reservas_mermas_v14.sql").read_text(encoding="utf8"))
+    reserve_pending_wastes(db)
+
+
 def preparar(db):
     if db.execute("SELECT DB_ID()").fetchone()[0] <= 4:
         raise ValueError("Elige una base exclusiva de JuniorsControl.")
@@ -165,8 +172,11 @@ def preparar(db):
             version = 12
         if version == 12:
             db.execute((ROOT/"sql/areas_insumos_v13.sql").read_text(encoding="utf8"))
-            return
+            version = 13
         if version == 13:
+            _aplicar_v14(db)
+            return
+        if version == 14:
             return
         if version != 2:
             raise ValueError("Versión de esquema incompatible.")
@@ -188,3 +198,4 @@ def preparar(db):
     db.execute((ROOT/"sql/porciones_v11.sql").read_text(encoding="utf8"))
     db.execute((ROOT/"sql/categorias_atencion_v12.sql").read_text(encoding="utf8"))
     db.execute((ROOT/"sql/areas_insumos_v13.sql").read_text(encoding="utf8"))
+    _aplicar_v14(db)

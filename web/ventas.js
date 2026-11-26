@@ -3,7 +3,7 @@
 
 // Importes en céntimos. Los cobros y devoluciones pertenecen al día de su propia operación.
 function ventasPeriodo(orders,start,end){
- const report={count:0,gross:0,refunded:0,voided:0,net:0,unlocated:0,entries:[]};
+ const report={count:0,gross:0,refunded:0,voided:0,net:0,unlocated:0,entries:[],collections:new Map()};
  const rows=new Map();
  function addLine(line,quantity,cents,isReturn){
    let row=rows.get(line.product_id);
@@ -27,7 +27,11 @@ function ventasPeriodo(orders,start,end){
        gross+=amount;addLine(line,line.qty,amount,false);
      }
      report.gross+=gross;report.count++;
-     report.entries.push({at:o.paid_at,kind:"Cobro",method:o.payment_method,code:o.sale_code,order:o.code,day:o.day,mesa:o.table_name,who:o.cashier,amount:gross,id:o.id});
+     const payments=o.payments?.length?o.payments:[{method:o.payment_method||"Sin especificar",cents:gross}];
+     for(const {method,cents} of payments){
+       report.collections.set(method,(report.collections.get(method)||0)+cents);
+     }
+     report.entries.push({at:o.paid_at,kind:"Cobro",payments,code:o.sale_code,order:o.code,day:o.day,mesa:o.table_name,who:o.cashier,amount:gross,id:o.id});
    }
    for(const r of o.returns||[]){
      const line=o.lines.find(l=>l.product_id===r.product_id);
@@ -55,8 +59,8 @@ function ventasPeriodo(orders,start,end){
  let owner=null,from="",to="",activeDay="";
  const money=cents=>cash(cents/100);
  function downloadReport(report){
-   const rows=[["Fecha y hora","Operación","Código","Comanda","Jornada de comanda","Mesa o referencia","Responsable","Importe (S/)"]];
-   for(const e of report.entries)rows.push([e.at,e.kind,e.code,e.order,e.day,e.mesa,e.who,e.amount/100]);
+   const rows=[["Fecha y hora","Operación","Código","Comanda","Jornada de comanda","Mesa o referencia","Responsable","Importe (S/)","Medios de pago"]];
+   for(const e of report.entries)rows.push([e.at,e.kind,e.code,e.order,e.day,e.mesa,e.who,e.amount/100,formatPayments(e.payments)]);
    exportCsv(`Ventas_${from}_${to}.csv`,rows);
  }
  function viewDay(day){
@@ -104,7 +108,7 @@ function ventasPeriodo(orders,start,end){
    const r=ventasPeriodo(S.orders,from,to);
    const metric=(label,value)=>`<div class="metric"><span>${h(label)}</span><b class="value">${h(value)}</b></div>`;
    const records=r.entries.map(e=>[
-      `<b>${h(e.code)}</b><small class="sub">${h(e.kind)+(e.method?" · "+h(e.method):"")}</small>`,
+      `<b>${h(e.code)}</b><small class="sub">${h(e.kind)}</small>${e.payments?.length?`<small class="sub">${h(formatPayments(e.payments))}</small>`:""}`,
       h(e.at),`<b>${h(e.order)}</b><small class="sub">${h(displayDate(e.day))}</small>`,
       h(e.mesa),h(e.who),money(e.amount),button("Ver detalle de comanda",()=>details(S.orders.find(o=>o.id===e.id),true),"link")+(e.kind==="Cobro"?voidButton(S.orders.find(o=>o.id===e.id)):"")]);
    const products=r.products.map(p=>[h(p.name),fmt(p.sold),fmt(p.returned),money(p.amount)]);
@@ -119,7 +123,8 @@ function ventasPeriodo(orders,start,end){
    const expenseRows=expenses.map(e=>[h(e.day),h(e.kind),h(e.reference),h(e.concept),money(e.cents),h(e.actor),
      e.void_at?h("Anulado · "+e.void_reason+" · "+e.void_by):e.day!==S.today?"Registrado":button("Anular",()=>modal("Anular gasto",input("reason","Motivo","text","","required"),
        v=>run("gestion.void_expense",{id:e.id,day:e.day,reason:v.reason},"Gasto anulado")),"link")]);
-   const methods=["Efectivo","Yape","Tarjeta","Sin especificar","Cambio"].map(m=>[m,r.entries.filter(e=>e.kind==="Cobro"&&e.method===m).reduce((n,e)=>n+e.amount,0)]).filter(([,amount])=>amount);
+   const methodOrder=new Set([...paymentMethods,"Sin especificar","Cambio",...r.collections.keys()]);
+   const methods=[...methodOrder].map(method=>[method,r.collections.get(method)]).filter(([,amount])=>amount);
    const expectedDay=S.today;
    const jornada=button("Cambiar jornada",()=>modal("Jornada de caja",input("day","Fecha de trabajo (vacía para usar la fecha actual)","date",S.today),
      async v=>{await run("gestion.cash_day",{...v,expected_day:expectedDay},"Jornada actualizada");from=S.today;to=S.today;render()}),"secondary");

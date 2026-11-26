@@ -3,6 +3,7 @@
 let ticket={lines:[],table_name:"",table_number:null,floor:1,take_away:false,id:null,version:null,code:"",day:""},menuCategory="Todos",menuQuery="";
 let orderFilter="Abiertas",orderDay=null,orderQuery="";
 const menuCategoryOrder=["Brasas","Parrillas","Barra","Orientales"];
+const paymentMethods=["Efectivo","Yape","Tarjeta"];
 function resetTicket(){ticket={lines:[],table_name:"",table_number:null,floor:1,take_away:false,id:null,version:null,code:"",day:""};menuCategory="Todos";menuQuery="";orderFilter="Abiertas";orderDay=null;orderQuery=""}
 function norm(v){return String(v||"").toLowerCase().normalize("NFD").replace(/[\u0300-\u036f]/g,"")}
 function orderCode(o){return `${h(o.code)} <small class="sub">${h(displayDate(o.day))}</small>`}
@@ -151,6 +152,24 @@ function editOrder(o){
  const change=()=>{ticket={take_away:!!o.take_away,id:o.id,version:o.version,code:o.code,day:o.day,table_name:o.table_name,table_number:o.table_number||Number(String(o.table_name).replace(/^Mesa /i,"")),floor:o.floor||(Number(o.table_number||String(o.table_name).replace(/^Mesa /i,""))>10?2:1),lines:o.details.map(l=>({...l}))};menuQuery="";menuCategory="Todos";go("atencion")};
  if(ticket.lines.length&&ticket.id!==o.id){modal("Cambiar de comanda","<p>Se descartarán los cambios del borrador abierto en atención.</p>",async()=>change(),"Continuar")}else{change()}
 }
+function formatPayments(payments, fallback=""){
+ return payments?.length?payments.map(p=>`${p.method} ${cash(p.cents/100)}`).join(" · "):fallback;
+}
+
+function splitPaymentAmounts(values){
+ const payments=[];
+ for(const method of paymentMethods){
+   const value=String(values["amount_"+method]??"").trim();
+   if(!value)continue;
+   const match=/^(\d+)(?:[.,](\d{1,2}))?$/.exec(value);
+   if(!match)throw Error("Escribe importes con hasta dos decimales.");
+   const cents=Number(match[1])*100+Number((match[2]||"").padEnd(2,"0"));
+   if(!Number.isSafeInteger(cents))throw Error("Revisa el importe del pago.");
+   if(cents)payments.push({method,cents});
+ }
+ return payments;
+}
+
 function chargeOrder(o){
  const day=S.today;
  const delivered=o.details.filter(d=>d.status==="Entregado");
@@ -159,12 +178,39 @@ function chargeOrder(o){
    <div class="line"><span>Solicitado</span><b>${cash(o.total)}</b></div>`+
    table(["Producto entregado","Cantidad","Importe"],delivered.map(d=>[h(d.name),d.qty,cash(d.price*d.qty)]))+
    `<div class="total"><strong>A cobrar ahora</strong><strong>${cash(cents/100)}</strong></div>`+
-   select("payment_method","Medio de pago",["Efectivo","Yape","Tarjeta"].map(m=>[m,m]))+
+   '<label class="check"><input type="checkbox" name="split_payment"> Dividir pago entre varios medios</label>'+
+   '<div id="single-payment">'+select("payment_method","Medio de pago",paymentMethods.map(m=>[m,m]))+'</div>'+
+   '<fieldset id="split-payments" disabled style="display:none"><legend>Importes por medio de pago</legend>'+
+   paymentMethods.map(method=>input("amount_"+method,method+" (S/)","number","","min=0 step=0.01")).join("")+
+   '<p class="muted" id="payment-balance" role="status"></p></fieldset>'+
    "<p>Al cobrar se cerrará la comanda y se cancelarán los detalles pendientes.</p>";
- modal("Cobrar "+o.code,fields,async values=>{
-   await run("pedidos.pay",{id:o.id,version:o.version,payment_method:values.payment_method,expected_day:day,expected_cents:cents},o.code+" cobrada.");
+ const dialog=modal("Cobrar "+o.code,fields,async values=>{
+   const payments=values.split_payment?splitPaymentAmounts(values):[{method:values.payment_method,cents}];
+   if(payments.reduce((sum,p)=>sum+p.cents,0)!==cents)throw Error("Los importes por medio deben sumar el total a cobrar.");
+   await run("pedidos.pay",{id:o.id,version:o.version,payments,expected_day:day,expected_cents:cents},o.code+" cobrada.");
    if(ticket.id===o.id)resetTicket();
  },"Confirmar cobro");
+ const form=dialog.querySelector("form");
+ const toggle=form.elements.namedItem("split_payment");
+ const single=dialog.querySelector("#single-payment");
+ const split=dialog.querySelector("#split-payments");
+ const balance=dialog.querySelector("#payment-balance");
+ form.addEventListener("input",()=>{
+   const enabled=toggle.checked;
+   single.hidden=enabled;
+   form.elements.namedItem("payment_method").disabled=enabled;
+   split.disabled=!enabled;
+   split.style.display=enabled?"grid":"none";
+   if(!enabled)return;
+   try{
+     const payments=splitPaymentAmounts(Object.fromEntries(new FormData(form)));
+     const remaining=cents-payments.reduce((sum,p)=>sum+p.cents,0);
+     balance.textContent=remaining>0?`Faltan ${cash(remaining/100)}`:
+       remaining<0?`El pago excede el total en ${cash(-remaining/100)}`:"Total cubierto";
+   }catch(error){
+     balance.textContent=error.message;
+   }
+ });
 }
 function refund(o,l,exchange=false){
  const max=l.qty-l.refunded, alternatives=S.products.filter(p=>p.id!==l.product_id);
@@ -214,8 +260,9 @@ function details(o,manageReturns=false){
  const rows=o.lines.map(l=>[h(l.name),h(l.qty),cash(l.price),h(l.prep_status||"Sin enviar")+(l.prep?.delivered_at?`<small class="sub">${h(l.prep.delivered_at)}</small>`:""),h(l.refunded),cash((l.qty-l.refunded)*l.price),o.status==="Cobrado"&&mayCharge&&l.qty>l.refunded?'<div class="actions">'+button("Devolver",()=>refund(o,l),"link")+button("Cambiar",()=>refund(o,l,true),"secondary")+'</div>':""]);
  const returns=(o.returns||[]).map(r=>[h(r.code),h(r.name),h(r.qty),h(r.reason)+(r.undone_at?`<small class="sub">Revertida · ${h(r.undone_by)}</small>`:"")+(r.replacement_sale_code?`<small class="sub">Reemplazo · ${h(r.replacement_sale_code)}</small>`:""),h(r.operator)]);
  const origin=o.exchange_origin;
+ const paymentSummary=formatPayments(o.payments,o.payment_method);
  const source=origin?`<p class="notice">Reemplazo ${h(origin.exchange_code)} de la venta ${h(origin.sale_code)} · ${h(origin.code)} del ${h(displayDate(origin.day))} · Devolución ${h(origin.return_code)}.</p>`:"";
- modal(o.code+" · "+o.table_name,`${o.sale_void?`<p class="notice">Venta anulada · ${h(o.sale_void.actor)} · ${h(o.sale_void.at)} · ${h(o.sale_void.reason)}</p>`:""}${source}<p class="notice">${o.take_away?"Para llevar":"En el local"}</p>${table(["Detalle","Producto","Cantidad","Estado"],o.details.map(d=>[d.detail_no,h(d.name),d.qty,h(d.pending?"Pendiente de envío":d.status)]))}<div class="summary"><span>${h(displayDate(o.day))} · ${h(o.operator)}</span>${badge(o.status)}</div>${table(["Producto","Uds.","Precio","Preparación / entrega","Dev.","Neto",""],rows)}<div class="total"><strong>Total neto</strong><strong>${cash(o.total)}</strong></div>${o.paid_at?`<p class="muted">Venta ${h(o.sale_code)} · Cobro registrado el ${h(o.paid_at)} por ${h(o.cashier)}.</p>`:""}${returns.length?`<h3>Devoluciones</h3>${table(["Código","Producto","Uds.","Motivo","Responsable"],returns)}`:""}`,null);
+ modal(o.code+" · "+o.table_name,`${o.sale_void?`<p class="notice">Venta anulada · ${h(o.sale_void.actor)} · ${h(o.sale_void.at)} · ${h(o.sale_void.reason)}</p>`:""}${source}<p class="notice">${o.take_away?"Para llevar":"En el local"}</p>${table(["Detalle","Producto","Cantidad","Estado"],o.details.map(d=>[d.detail_no,h(d.name),d.qty,h(d.pending?"Pendiente de envío":d.status)]))}<div class="summary"><span>${h(displayDate(o.day))} · ${h(o.operator)}</span>${badge(o.status)}</div>${table(["Producto","Uds.","Precio","Preparación / entrega","Dev.","Neto",""],rows)}<div class="total"><strong>Total neto</strong><strong>${cash(o.total)}</strong></div>${o.paid_at?`<p class="muted">Venta ${h(o.sale_code)} · Cobro registrado el ${h(o.paid_at)} por ${h(o.cashier)}.</p>${paymentSummary?`<p>${h(paymentSummary)}</p>`:""}`:""}${returns.length?`<h3>Devoluciones</h3>${table(["Código","Producto","Uds.","Motivo","Responsable"],returns)}`:""}`,null);
 }
 function viewOrdersDay(day){
  orderDay=day;orderQuery="";orderFilter="Todas";go("comandas");

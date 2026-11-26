@@ -13,6 +13,7 @@ import porciones
 LIMA = timezone(timedelta(hours=-5))
 SYSTEM = {"id": 0, "name": "Sistema", "role": "admin", "area": ""}
 INVENTORY_AREAS = ("Brasas", "Parrillas", "Barra", "Orientales", "Limpieza y Atención")
+PAYMENT_METHODS = ("Efectivo", "Yape", "Tarjeta")
 STAFF_AREAS = ("Cocina", "Barra", "Parrilla", "Limpieza", "Atención", "Horno")
 STAFF_INVENTORY_AREAS = {
     "cocina": ("Orientales",),
@@ -608,6 +609,32 @@ def _close_details(db,order):
     return delivered
 
 
+def _payment_breakdown(payload, total):
+    if "payments" not in payload:
+        method = payload.get("payment_method", "Efectivo")
+        if method not in PAYMENT_METHODS:
+            raise ValueError("Selecciona un medio de pago válido.")
+        return [(method, total)]
+
+    entries = payload["payments"]
+    if not isinstance(entries, list) or not 1 <= len(entries) <= len(PAYMENT_METHODS):
+        raise ValueError("Indica los medios de pago y sus importes.")
+
+    payments = {}
+    for entry in entries:
+        if not isinstance(entry, dict):
+            raise ValueError("Revisa el detalle del pago.")
+        method, cents = entry.get("method"), entry.get("cents")
+        if method not in PAYMENT_METHODS or method in payments:
+            raise ValueError("Selecciona medios de pago válidos y distintos.")
+        if type(cents) is not int or cents <= 0:
+            raise ValueError("Cada medio utilizado debe tener un importe mayor que cero.")
+        payments[method] = cents
+    if sum(payments.values()) != total:
+        raise ValueError("Los importes por medio deben sumar el total a cobrar.")
+    return list(payments.items())
+
+
 def _pay(db,user,p,*,exchange=False):
     _role(user,"caja","admin")
     o=_get_order(db,p)
@@ -629,16 +656,18 @@ def _pay(db,user,p,*,exchange=False):
                         WHERE a.order_id=? GROUP BY a.lot_id,l.expiry""",(o["id"],)).fetchall()
     if not parts or any(expiry and expiry<today() for _,_,expiry in parts):
         raise ValueError("La reserva venció. Revisa los insumos y vuelve a guardar el pedido.")
-    method=p.get("payment_method","Efectivo" if not exchange else "Cambio")
-    if method not in ("Efectivo","Yape","Tarjeta") and not exchange:
-        raise ValueError("Selecciona un medio de pago válido.")
     day=business_day(db)
     if p.get("expected_day",day)!=day:
         raise ValueError("Cambió la jornada de caja. Actualiza antes de cobrar.")
     amount=db.execute("SELECT SUM(qty*price) FROM inv_lines WHERE order_id=?",(o["id"],)).fetchone()[0]
     if p.get("expected_cents",amount)!=amount:
         raise ValueError("Cambió el importe. Revisa el total antes de cobrar.")
+    payments = [] if exchange else _payment_breakdown(p, amount)
+    method = "Cambio" if exchange else payments[0][0] if len(payments)==1 else "Mixto"
     sale_id=db.execute("INSERT INTO inv_sales(order_id,payment_method,cash_day) OUTPUT INSERTED.id VALUES(?,?,?)",(o["id"],method,day)).lastrowid
+    if payments:
+        db.executemany("INSERT INTO inv_sale_payments(sale_id,method,cents) VALUES(?,?,?)",
+                       ((sale_id, method, cents) for method,cents in payments))
     sale_code=public("V",sale_id)
     for lot,amount,_ in parts:
         db.execute("UPDATE inv_lots SET reserved=reserved-? WHERE id=?",(amount,lot))
@@ -1008,9 +1037,13 @@ def _orders(db,user,balances):
         if not attending:
             r.update(sale_code=None,returns=[])
     if not attending:
+        payments=defaultdict(list)
+        for sale_id,method,cents in db.execute("SELECT sale_id,method,cents FROM inv_sale_payments ORDER BY sale_id,method"):
+            payments[sale_id].append({"method":method,"cents":cents})
         for sale_id,order_id,method,day in db.execute("SELECT id,order_id,payment_method,cash_day FROM inv_sales"):
             rows[order_id]["cash_day"]=day
             rows[order_id]["payment_method"]=method or "Sin especificar"
+            rows[order_id]["payments"]=payments[sale_id]
             rows[order_id]["sale_code"]=public("V",sale_id)
         for v in db.execute("SELECT * FROM sale_voids"):
             rows[v["order_id"]]["sale_void"]=dict(v)

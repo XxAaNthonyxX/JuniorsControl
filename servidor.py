@@ -100,9 +100,10 @@ def maintain(stop):
 
 
 def snapshot(db, user):
-    result = dict(user=user, today=inventario.today(), **acceso.state(db,user))
+    day = inventario.today()
+    result = dict(user=user, today=day, **acceso.state(db,user))
     if user:
-        result.update(inventario.state(db,user))
+        result.update(inventario.state(db,user,day))
         result.update(gestion.state(db,user))
     return result
 

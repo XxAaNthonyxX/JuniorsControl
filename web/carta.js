@@ -37,7 +37,9 @@ function jumpToTicket(){
 }
 function ticketPanel(){
  const n=ticket.lines.reduce((a,l)=>a+l.qty,0);
- return `<section class="ticket" tabindex="-1" aria-label="Pedido actual"><header><div class="ticket-icon">${icon("receipt")}</div><div><div class="eyebrow">${ticket.id?"EDITAR COMANDA":"NUEVA COMANDA"}</div><h2>${ticket.id?h(ticket.code):"Pedido actual"}</h2></div>${button("Volver a la carta",()=>jumpTo(".catalog"),"link catalog-jump")}</header><div class="ticket-ref"><div class="grid2">
+ const preview=ticket.id?null:S.next_order_code;
+ const code=ticket.id?ticket.code:preview;
+ return `<section class="ticket" tabindex="-1" aria-label="Pedido actual"><header><div class="ticket-icon">${icon("receipt")}</div><div><div class="eyebrow">${ticket.id?"EDITAR COMANDA":"NUEVA COMANDA"}</div><h2>${code?h(code):"Pedido actual"}</h2>${preview?'<p class="sub">Número provisional hasta registrar</p>':""}</div>${button("Volver a la carta",()=>jumpTo(".catalog"),"link catalog-jump")}</header><div class="ticket-ref"><div class="grid2">
  ${select("piso","Piso",[[1,"Piso 1 · Mesas 1 a 10"],[2,"Piso 2 · Mesas 11 a 20"]],ticket.floor||1)}
  <label class="field"><span>Número de mesa</span><select id="mesa" name="table_number" required><option value="">Selecciona mesa</option>${Array.from({length:10},(_,i)=>(ticket.floor===2?11:1)+i).map(n=>{
  const occupied=(S.orders||[]).some(o=>o.day===S.today&&["Reservado","Por revisar"].includes(o.status)&&o.id!==ticket.id&&(Number(o.table_number)===n||(!o.table_number&&["Mesa "+n,String(n)].includes(o.table_name))));

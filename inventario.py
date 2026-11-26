@@ -30,6 +30,10 @@ def _order_ref(row):
     return f"{public('C', row['number'])} · {row['day']}"
 
 
+def _next_order_number(db, day):
+    return db.execute("SELECT COALESCE(MAX(number),0)+1 FROM inv_orders WHERE day=?", (day,)).fetchone()[0]
+
+
 def _scaled(value, scale, label, low=1, high=1_000_000_000):
     try:
         d = Decimal(str(value).strip().replace(",", "."))
@@ -407,7 +411,7 @@ def _save_order(db,user,p,*,exchange=False):
     else:
         timestamp=now()
         day=timestamp[:10]
-        number=db.execute("SELECT COALESCE(MAX(number),0)+1 FROM inv_orders WHERE day=?",(day,)).fetchone()[0]
+        number=_next_order_number(db,day)
         order=db.execute("""INSERT INTO inv_orders(table_name,table_number,status,created,operator,user_id,day,number) OUTPUT INSERTED.id
                             VALUES(?,?,'Reservado',?,?,?,?,?)""",(table,number_table,timestamp,user["name"],user["id"],day,number)).lastrowid
     for product_id,n in requested.items():
@@ -821,7 +825,7 @@ def _orders(db,user,balances):
     return list(rows.values())
 
 
-def state(db,user):
+def state(db,user,day):
     _role(user,"admin","caja","atencion","area","recepcion")
     all_items=stock(db)
     balances={i["id"]:int(Decimal(str(i["available"]))*1000) for i in all_items}
@@ -849,6 +853,8 @@ def state(db,user):
             "products":_products(db,balances) if can_order else [],
             "orders":_orders(db,user,balances),"preparation":_preparation(db,user),"rules":rules,"can_prepare":can_prepare,
             "movements":_history(db,user,{},recent=True)}
+    if can_order:
+        result["next_order_code"]=public("C",_next_order_number(db,day))
     if user["role"] in ("admin","caja"):
         result["net_sales"]=net_sales(db)/100
     return result

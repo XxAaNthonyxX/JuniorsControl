@@ -10,14 +10,53 @@ function productBy(id){return S.products.find(p=>p.id===id)}
 function originalLine(p){return ticket.id?S.orders.find(o=>o.id===ticket.id)?.lines.find(l=>l.product_id===p.id):null}
 function priceFor(p){return originalLine(p)?.price??p.price}
 function sumTicket(){return ticket.lines.reduce((sum,l)=>sum+l.price*l.qty,0)}
-function menuLimit(p){const prior=ticket.id?S.orders.find(o=>o.id===ticket.id):null;
- const line=prior?.lines.find(l=>l.product_id===p.id);
- return line?.max_qty??(p.available+(prior?.status==="Reservado"?(line?.qty||0):0))}
-function usedQty(p){return ticket.lines.reduce((n,l)=>n+(l.product_id===p.id?l.qty:0),0)}
+function replacementSlot(){
+ return ticket.lines.find(l=>!l.product_id)||ticket.lines.find(l=>l.detail_no===ticket.replaceNumber);
+}
+function stockForMenu(replaced){
+ const order=ticket.id?S.orders.find(o=>o.id===ticket.id):null;
+ const recipes=new Map();
+ const balances=new Map();
+ for(const product of S.products)recipes.set(product.id,product.recipe);
+ for(const line of order?.lines||[]){
+   if(line.recipe)recipes.set(line.product_id,line.recipe);
+ }
+ for(const recipe of recipes.values()){
+   for(const ingredient of recipe)balances.set(ingredient.item_id,Math.round(ingredient.available*1000));
+ }
+ if(order?.status==="Reservado"){
+   for(const line of order.lines){
+     for(const ingredient of line.ingredients){
+       const id=ingredient.item_id;
+       balances.set(id,(balances.get(id)||0)+Math.round(ingredient.qty*1000));
+     }
+   }
+ }
+ for(const line of ticket.lines){
+   if(line===replaced)continue;
+   for(const ingredient of recipes.get(line.product_id)||[]){
+     const id=ingredient.item_id;
+     balances.set(id,balances.get(id)-Math.round(ingredient.qty*1000)*line.qty);
+   }
+ }
+ return {recipes,balances};
+}
+function menuAvailability(product,stock){
+ const limits=(stock.recipes.get(product.id)||[]).map(ingredient=>({
+   item_id:ingredient.item_id,
+   count:Math.max(0,Math.floor(stock.balances.get(ingredient.item_id)/Math.round(ingredient.qty*1000))),
+ }));
+ const available=limits.length?Math.min(...limits.map(l=>l.count)):0;
+ const shared=product.recipe.find(ingredient=>ingredient.shared_stock);
+ const portions=shared?limits.find(l=>l.item_id===shared.item_id)?.count:null;
+ const limitingNames=limits.filter(l=>l.count===available&&l.item_id!==shared?.item_id)
+   .map(l=>product.recipe.find(ingredient=>ingredient.item_id===l.item_id)?.name).filter(Boolean);
+ return {available,portions,limitingNames};
+}
 function addDetail(p){
  if(!ticket.table_number){toast("Selecciona primero el piso y la mesa.",true);jumpTo(".ticket-ref");return}
- const slot=ticket.lines.find(l=>!l.product_id)||ticket.lines.find(l=>l.detail_no===ticket.replaceNumber);
- const available=menuLimit(p)-usedQty(p)+(slot?.product_id===p.id?slot.qty:0);
+ const slot=replacementSlot();
+ const {available}=menuAvailability(p,stockForMenu(slot));
  if(available<1){toast("Producto sin disponibilidad.",true);return}
  const detail={detail_no:slot?.detail_no??(Math.max(0,...ticket.lines.map(l=>l.detail_no))+1),
    product_id:p.id,name:originalLine(p)?.name??p.name,price:priceFor(p),qty:1};
@@ -27,7 +66,9 @@ function addDetail(p){
 }
 function changeDetailQty(l,delta){
  if(l.status==="Entregado")return;
- if(delta>0&&usedQty(productBy(l.product_id))>=menuLimit(productBy(l.product_id))){toast("Cantidad no disponible.",true);return}
+ if(delta>0&&menuAvailability(productBy(l.product_id),stockForMenu()).available<delta){
+   toast("Cantidad no disponible.",true);return;
+ }
  l.qty+=delta;
  if(!l.qty){l.product_id=null;l.price=0;ticket.replaceNumber=l.detail_no}
  drawPOS();
@@ -43,21 +84,23 @@ function detailCard(l){
 }
 function productStock(p){
  const rows=p.recipe.map(line=>{
-   const item=S.items.find(i=>i.id===line.item_id);
-   if(!item)return [h(line.item_id),fmt(line.qty),'Sin información',''];
-   const count=Math.floor(Math.round(item.available*1000)/Math.round(line.qty*1000));
-   return [h(item.name),`${fmt(line.qty)} ${h(item.unit)}`,`${fmt(item.available)} ${h(item.unit)}`,fmt(count)];
+   const count=Math.floor(Math.round(line.available*1000)/Math.round(line.qty*1000));
+   return [h(line.name),`${fmt(line.qty)} ${h(line.unit)}`,`${fmt(line.available)} ${h(line.unit)}`,fmt(count)];
  });
  modal('Disponibilidad · '+p.name,
    `<p>Platos disponibles con todos los insumos de la receta: <b>${fmt(p.available)}</b>.</p>`+
    table(['Insumo','Por plato','Stock libre','Platos posibles'],rows)+
-   '<p>La disponibilidad del plato depende del insumo que permita preparar menos platos. Transformar pollo aumenta su stock; revisa también los demás ingredientes.</p>',null);
+   '<p>El insumo que permite preparar menos platos marca el límite de venta. Cuartos, medios y enteros usan el mismo stock de pollo cocido.</p>',null);
 }
 function menuCards(){
  const products=S.products.filter(p=>(menuCategory==="Todos"||menuCategory===p.category)&&norm(p.name+" "+p.code).includes(norm(menuQuery)));
  if(!products.length)return `<div class="empty-state">No se encontraron productos. ${S.products.length?"Prueba otra búsqueda.":S.user.role==="admin"?"Añade la receta desde Inventario.":""}</div>`;
- return `<div class="menu-grid">${products.map(p=>{const left=menuLimit(p)-usedQty(p)+(ticket.lines.find(l=>l.detail_no===ticket.replaceNumber && l.product_id===p.id)?.qty||0);
- return `<article class="food-card"><div class="food-photo">${p.id<=6&&S.demo_assets!==false&&p.name===["Cuarto de pollo a la brasa","Medio pollo a la brasa","Parrilla personal","Chaufa de pollo","Chicha morada","Gaseosa personal"][p.id-1]?`<img src="/carta-${p.id}.jpg" alt="${h(p.name)}">`:`<div class="food-placeholder">${icon("plate")}</div>`}<span class="food-category">${h(p.category)}</span></div><div class="food-info"><span class="product-code">${h(p.code)}</span><h3>${h(p.name)}</h3><div class="food-base"><div><b>${cash(priceFor(p))}</b><small class="${left<=0?"out":""}">${left>0?`${fmt(left)} disponibles`:"Sin disponibilidad"}</small>${S.user.role==="admin"?button("Ver disponibilidad",()=>productStock(p),"link"):""}</div><button type="button" class="add" aria-label="Añadir ${h(p.name)}" ${left>0?bind(()=>addDetail(p)):"disabled"}>+</button></div></div></article>`}).join("")}</div>`;
+ const stock=stockForMenu(replacementSlot());
+ return `<div class="menu-grid">${products.map(p=>{
+ const {available:left,portions,limitingNames}=menuAvailability(p,stock);
+ const chicken=portions==null?"":`<small>Pollo cocido para ${fmt(portions)} de esta presentación</small>`;
+ const limit=portions>left&&limitingNames.length?`<small>Limitado por ${h(limitingNames.join(", "))}</small>`:"";
+ return `<article class="food-card"><div class="food-photo">${p.id<=6&&S.demo_assets!==false&&p.name===["Cuarto de pollo a la brasa","Medio pollo a la brasa","Parrilla personal","Chaufa de pollo","Chicha morada","Gaseosa personal"][p.id-1]?`<img src="/carta-${p.id}.jpg" alt="${h(p.name)}">`:`<div class="food-placeholder">${icon("plate")}</div>`}<span class="food-category">${h(p.category)}</span></div><div class="food-info"><span class="product-code">${h(p.code)}</span><h3>${h(p.name)}</h3><div class="food-base"><div><b>${cash(priceFor(p))}</b><small class="${left<=0?"out":""}">${left>0?`${fmt(left)} platos disponibles`:"Sin platos disponibles"}</small>${chicken}${limit}${S.user.role==="admin"?button("Ver disponibilidad",()=>productStock(p),"link"):""}</div><button type="button" class="add" aria-label="Añadir ${h(p.name)}" ${left>0?bind(()=>addDetail(p)):"disabled"}>+</button></div></div></article>`}).join("")}</div>`;
 }
 function jumpTo(selector){
  const target=document.querySelector(selector);

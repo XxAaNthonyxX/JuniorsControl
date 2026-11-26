@@ -971,7 +971,9 @@ def _history(db,user,p,recent=False):
     return result
 
 
-def _products(db,balances):
+def _products(db,balances,all_items):
+    items={item["id"]:item for item in all_items}
+    shared_items={item["base_id"] for item in all_items if "base_id" in item}
     recipes=defaultdict(list)
     for p,i,n in db.execute("SELECT product_id,item_id,amount FROM inv_recipes ORDER BY product_id,item_id"):
         recipes[p].append((i,n))
@@ -981,7 +983,10 @@ def _products(db,balances):
         prod["code"]=public("PR",row["id"])
         raw=recipes[prod["id"]]
         prod["available"]=min((balances[i]//n for i,n in raw),default=0)
-        prod["recipe"]=[{"item_id":i,"qty":num(n)} for i,n in raw]
+        prod["recipe"]=[{
+            "item_id":i, "qty":num(n), "available":items[i]["available"],
+            "name":items[i]["name"], "unit":items[i]["unit"], "shared_stock":i in shared_items,
+        } for i,n in raw]
         prod["price"]/=100
         products.append(prod)
     return products
@@ -1058,11 +1063,13 @@ def _orders(db,user,balances):
         ingredients[(row["order_id"],row["product_id"])].append(
             {"item_id":row["item_id"],"name":row["name"],"unit":row["unit"],"qty":num(row["n"])})
     capacity={}
+    saved_recipes=defaultdict(list)
     for oid,pid,item_id,unit_amount in db.execute("""SELECT r.order_id,r.product_id,r.item_id,r.amount
             FROM inv_line_recipes r JOIN inv_orders o ON o.id=r.order_id WHERE o.status IN ('Reservado','Por revisar')"""):
         key=(oid,pid)
         units=balances[item_id]//unit_amount
         capacity[key]=min(units,capacity.get(key,units))
+        saved_recipes[key].append({"item_id":item_id,"qty":num(unit_amount),"available":num(balances[item_id])})
     detail_groups=defaultdict(list)
     for order in rows.values():
         for d in order["details"]:
@@ -1079,6 +1086,7 @@ def _orders(db,user,balances):
         line["prep_status"]="Entregado" if group and all(d["status"]=="Entregado" for d in group) else "Pendiente"
         if key in capacity:
             line["max_qty"]=capacity[key]+(line["qty"] if order["status"]=="Reservado" else 0)
+            line["recipe"]=saved_recipes[key]
         order["lines"].append(line)
     for r in rows.values():
         r["gross"]/=100
@@ -1114,7 +1122,7 @@ def state(db,user,day):
     result={"items":items,"lots":[r for r in batches(db) if r["item_id"] in allowed],
             "areas":INVENTORY_AREAS if wide else assigned_areas,
             "inventory_access_areas":assigned_areas,"categories":sorted({i["category"] for i in items}),
-            "products":_products(db,balances) if can_order else [],
+            "products":_products(db,balances,all_items) if can_order else [],
             "orders":_orders(db,user,balances),"preparation":_preparation(db,user),"rules":rules,"can_prepare":can_prepare,
             "movements":_history(db,user,{},recent=True)}
     if user["role"]=="admin":

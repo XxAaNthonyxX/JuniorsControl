@@ -76,6 +76,15 @@
     form.addEventListener('change',update);
     update();
   }
+  function formItemCategory(i) {
+    const categories=[...new Set([...S.categories,i.category])].sort((a,b)=>a.localeCompare(b,'es'));
+    const fields=select('category','Categoría',asOptions(categories),i.category)+
+      input('new_category','Nueva categoría (opcional)','text','','maxlength="60"')+
+      '<p class="muted">Selecciona una categoría existente o escribe una nueva para asignarla al insumo.</p>';
+    modal(`Cambiar categoría · ${i.code} · ${i.name}`,fields,values=>run('inv.item_category',{
+      id:i.id,category:values.new_category.trim()||values.category
+    },'Categoría del insumo actualizada'),'Guardar categoría');
+  }
   function formUse(i) {
     const field = input('qty',`Cantidad a consumir (${i.unit})`,'number','','required min="0.001" step="0.001" max="'+Number(i.available)+'"') +
       input('reason','Motivo del consumo','text','','required maxlength="300" placeholder="Actividad del área"');
@@ -97,7 +106,7 @@
       (!selectedItem || String(i.id)===selectedItem)).map(i=>[
         h(i.code),`<strong>${h(i.name)}</strong><br><small class="muted">${h(i.category)}${i.base_id?` · ${i.factor} cuartos por unidad<br>Stock compartido con ${h(i.base_code)} · ${fmt(i.remaining_portions)} cuartos restantes<br>Físico incluye unidades empezadas. Disponible cuenta unidades completas`:""}</small>`,h(i.area),`${fmt(i.physical)} ${h(i.unit)}`,fmt(i.reserved),`<strong>${fmt(i.available)}</strong>`,
         badge(i.available===0 ? 'Agotado' : i.available<=i.min_qty ? 'Stock bajo' : 'Disponible'),
-        (isAdmin()?button('Editar',()=>formItem(i),'secondary'):'')+button('Ver lotes',()=>{ detail=i.id; refreshPanel(); document.getElementById('inventory-detail')?.scrollIntoView({block:'nearest'}); })
+        (isAdmin()?button('Editar',()=>formItem(i),'secondary')+button('Cambiar categoría',()=>formItemCategory(i),'secondary'):'')+button('Ver lotes',()=>{ detail=i.id; refreshPanel(); document.getElementById('inventory-detail')?.scrollIntoView({block:'nearest'}); })
       ]);
     return table(['Código','Insumo','Área','Físico','Reservado','Disponible','Estado','Acciones'],rows,'No hay insumos que coincidan con los filtros.');
   }

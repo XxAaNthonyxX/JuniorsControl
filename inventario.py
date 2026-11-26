@@ -287,6 +287,14 @@ def _save_item(db, user, p):
     return result
 
 
+def _item_category(db,user,p):
+    _role(user,"admin")
+    item=_item(db,p.get("id"))
+    category=_text(p.get("category"),"categoría",60)
+    db.execute("UPDATE inv_items SET category=? WHERE id=?",(category,item["id"]))
+    return {"id":item["id"],"category":category}
+
+
 def _menu_category(db,user,p):
     _role(user,"admin")
     name=_text(p.get("name"),"categoría",120)
@@ -1192,7 +1200,7 @@ def act(db,user,action,payload):
     if not isinstance(payload,dict):
         raise ValueError("Los datos de la operación son inválidos.")
     routes={"inv.portions":porciones.setup,"pedidos.void_sale":_void_sale,"pedidos.undo_request":_undo_request,"inv.menu_category":_menu_category,"pedidos.request_refund":_request_refund,"pedidos.resolve_refund":_resolve_refund,
-            "inv.item":_save_item,"inv.product":_save_product,"inv.rule":_rule,"inv.transform":_transform,
+            "inv.item":_save_item,"inv.item_category":_item_category,"inv.product":_save_product,"inv.rule":_rule,"inv.transform":_transform,
             "pedidos.save":_save_order,"pedidos.cancel":_cancel,"pedidos.pay":_pay,"pedidos.refund":_refund,
             "pedidos.exchange":_exchange,
             "pedidos.send":_send_to_areas,"pedidos.prep":_advance_preparation,

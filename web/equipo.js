@@ -9,7 +9,7 @@
   const roleNames = Object.fromEntries(roles);
 
   function assignmentFields(record = {}) {
-    const areas = [...new Set([...(S.areas || []), record.area].filter(Boolean))];
+    const areas = [...new Set([...(S.staff_areas || []), record.area].filter(Boolean))];
     return select("role", "Rol", roles, record.role || "atencion")
       + select("area", "Área asignada", [["", "Sin asignar"], ...areas.map(area => [area, area])], record.area || "")
       + '<p class="muted full">Asigna un área a cada responsable. Para el hornero, elige Recepción y su área de Cocina, Parrilla u Horno. Podrá validar entregas y registrar preparaciones de su área. Para el personal de limpieza, elige Recepción y Limpieza.</p>';

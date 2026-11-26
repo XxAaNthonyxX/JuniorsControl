@@ -33,15 +33,16 @@
     return sharesStock?'<p class="muted">El cambio de área se aplica también a las presentaciones que comparten este stock.</p>':'';
   }
   function formItem(i = {}) {
-    const lists = `<datalist id="inv-areas">${S.areas.map(v=>option(v,v,'')).join('')}</datalist>
-      <datalist id="inv-categories">${S.categories.map(v=>option(v,v,'')).join('')}</datalist>`;
+    const lists = `<datalist id="inv-categories">${S.categories.map(v=>option(v,v,'')).join('')}</datalist>`;
     const suggested=i.code||S.next_item_code;
     const rule=S.rules.find(r=>Number(r.source_id)===Number(i.id));
     const targets=itemOptions(S.items.filter(item=>Number(item.id)!==Number(i.id)));
     const fields = `<div class="field"><span id="item-code-label">Código del insumo</span><output aria-labelledby="item-code-label" class="notice">${h(suggested)}</output></div>` +
       input('name','Nombre del insumo','text',i.name || '','required maxlength="100"') +
       input('unit','Unidad de medida','text',i.unit || '','required maxlength="20" placeholder="kg, L, und…"') +
-      input('area','Área responsable','text',i.area || '','required maxlength="60" list="inv-areas"') +
+      `<label class="field"><span>Área responsable</span><select name="area" required>
+        ${option('','Seleccionar área',i.area||'')}${S.areas.map(name=>option(name,name,i.area)).join('')}
+      </select></label>` +
       sharedAreaNotice(i) +
       input('category','Categoría','text',i.category || '','required maxlength="60" list="inv-categories"') +
       input('min_qty','Cantidad mínima','number',i.min_qty ?? 0,'required min="0" step="0.001"') +
@@ -86,11 +87,10 @@
     const fields=select('category','Categoría',asOptions(S.categories),i.category)+
       input('new_category','Nueva categoría (opcional)','text','','maxlength="60"')+
       select('area','Área responsable',asOptions(S.areas),i.area)+
-      input('new_area','Nueva área (opcional)','text','','maxlength="60"')+
       sharedAreaNotice(i);
     modal(`Cambiar categoría o área · ${i.code} · ${i.name}`,fields,values=>{
       const category=values.new_category.trim()||values.category;
-      const area=values.new_area.trim()||values.area;
+      const area=values.area;
       const changes={id:i.id};
       if(category!==i.category)changes.category=category;
       if(area!==i.area)changes.area=area;
@@ -107,7 +107,7 @@
     const lots = S.lots.filter(l => Number(l.item_id) === Number(source.id));
     const lotRows = lots.map(l => [h(l.code),h(l.expiry || 'Sin vencimiento'),fmt(l.physical),fmt(l.reserved),fmt(l.available)]);
     const canConsume = isAdmin() || (['area','atencion','recepcion'].includes(S.user.role) &&
-      String(S.user.area || ({recepcion:'Limpieza',atencion:'Atención'}[S.user.role] || '')).toLowerCase() === i.area.toLowerCase());
+      S.inventory_access_areas.includes(i.area));
     const actions = (canConsume && i.available>0 ? button('Registrar consumo',()=>formUse(i),'primary') : '') +
       (isAdmin() ? button('Editar insumo',()=>formItem(i)) : '') + button('Cerrar',()=>{ detail=null; refreshPanel(); });
     return panel(`Lotes de ${source.name} (${source.unit})`,

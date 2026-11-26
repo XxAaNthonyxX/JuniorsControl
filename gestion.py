@@ -57,14 +57,13 @@ def _require(user, *roles):
 
 def _accessible(user, area):
     if user["role"] in ("area","atencion"):
-        assigned = user.get("area") or ("Atención" if user["role"]=="atencion" else "")
-        return assigned.casefold() == area.casefold()
+        return area in inv.inventory_access_areas(user)
     return True
 
 
 def _waste_accessible(user, area):
     if user["role"] == "recepcion":
-        return (user.get("area") or "Limpieza").casefold() == area.casefold()
+        return area in inv.inventory_access_areas(user)
     return _accessible(user, area)
 
 

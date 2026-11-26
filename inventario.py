@@ -12,7 +12,15 @@ import porciones
 
 LIMA = timezone(timedelta(hours=-5))
 SYSTEM = {"id": 0, "name": "Sistema", "role": "admin", "area": ""}
-DEFAULT_AREAS = ["Cocina", "Barra", "Parrilla", "Limpieza", "Atención"]
+INVENTORY_AREAS = ("Brasas", "Parrillas", "Barra", "Orientales", "Limpieza y Atención")
+STAFF_AREAS = ("Cocina", "Barra", "Parrilla", "Limpieza", "Atención", "Horno")
+STAFF_INVENTORY_AREAS = {
+    "cocina": ("Orientales",),
+    "parrilla": ("Brasas", "Parrillas"),
+    "horno": ("Brasas",),
+    "limpieza": ("Limpieza y Atención",),
+    "atención": ("Limpieza y Atención",),
+}
 
 
 def now():
@@ -95,14 +103,31 @@ def _area(user):
     return user.get("area") or {"recepcion": "Limpieza", "atencion": "Atención"}.get(user["role"], "")
 
 
+def _item_area(value):
+    area = _text(value, "área", 60)
+    for name in INVENTORY_AREAS:
+        if name.casefold() == area.casefold():
+            return name
+    raise ValueError("Selecciona un área de insumos del catálogo.")
+
+
+def inventory_access_areas(user):
+    assigned = _area(user).casefold()
+    if assigned in STAFF_INVENTORY_AREAS:
+        return STAFF_INVENTORY_AREAS[assigned]
+    return tuple(area for area in INVENTORY_AREAS if area.casefold() == assigned)
+
+
 def _can_prepare(user):
     return user["role"] in ("admin", "area") or (
-        user["role"] == "recepcion" and _area(user).casefold() in {"cocina", "parrilla", "horno"}
+        user["role"] == "recepcion" and any(
+            area in ("Brasas", "Parrillas", "Orientales") for area in inventory_access_areas(user)
+        )
     )
 
 
 def _in_area(user, area):
-    if user["role"] != "admin" and _area(user).casefold() != area.casefold():
+    if user["role"] != "admin" and area not in inventory_access_areas(user):
         raise PermissionError("El insumo pertenece a otra área.")
 
 
@@ -250,8 +275,8 @@ def _set_item_area(db, item, area):
 
 def _save_item(db, user, p):
     _role(user, "admin")
-    fields = [_text(p.get(k), k, limit) for k, limit in
-              (("name",100),("category",60),("area",60),("unit",20))]
+    fields = [_text(p.get("name"),"nombre",100), _text(p.get("category"),"categoría",60),
+              _item_area(p.get("area")), _text(p.get("unit"),"unidad",20)]
     fields += [_scaled(p.get("min_qty",0),1000,"Stock mínimo",0),
                _scaled(p.get("warn_days",3),1,"Días de aviso",0,3650),
                _bool(p.get("perishable")), _bool(p.get("transformable"))]
@@ -302,7 +327,7 @@ def _item_category(db,user,p):
     _role(user,"admin")
     item=_item(db,p.get("id"))
     category=_text(p["category"],"categoría",60) if "category" in p else item["category"]
-    area=_text(p["area"],"área",60) if "area" in p else item["area"]
+    area=_item_area(p["area"]) if "area" in p else item["area"]
     if category != item["category"]:
         db.execute("UPDATE inv_items SET category=? WHERE id=?",(category,item["id"]))
     _set_item_area(db, item, area)
@@ -900,22 +925,28 @@ def _history(db,user,p,recent=False):
     if p.get("start") and p.get("end") and p["start"]>p["end"]:
         raise ValueError("La fecha inicial debe ser anterior a la final.")
     area=p.get("area")
-    if user["role"] not in ("admin","caja","recepcion"):
-        if area:
-            _in_area(user,area)
-        area=_area(user)
-        if not area:
+    restricted=user["role"] not in ("admin","caja","recepcion")
+    if restricted:
+        history_areas={name.casefold() for name in (*inventory_access_areas(user),_area(user)) if name}
+        if area and area.casefold() not in history_areas:
+            raise PermissionError("El insumo pertenece a otra área.")
+        area_keys=sorted(history_areas) if not area else [area.casefold()]
+        if not area_keys:
             return []
-    if area:
+        placeholders=",".join("?" for _ in area_keys)
+        area_filter=f"LOWER(c.area) IN ({placeholders})"
+        conditions.append(area_filter)
+        args.extend(area_keys)
+    elif area:
         conditions.append("c.area=?")
         args.append(area)
     if p.get("item_id"):
         source_id,_=porciones.resolve(db,_id(p["item_id"]),0)
         item=_item(db,source_id)
-        if user["role"] not in ("caja","admin","recepcion") and item["area"].casefold()!=area.casefold():
+        if restricted and item["area"].casefold() not in area_keys:
             previous=db.execute("""SELECT 1 FROM inv_move_context c JOIN inv_moves m ON m.id=c.move_id
-                                   JOIN inv_lots l ON l.id=m.lot_id WHERE c.area=? AND l.item_id=?""",
-                                (area,item["id"])).fetchone()
+                                   JOIN inv_lots l ON l.id=m.lot_id WHERE """+area_filter+" AND l.item_id=?",
+                                (*area_keys,item["id"])).fetchone()
             if not previous:
                 raise PermissionError("El insumo pertenece a otra área.")
         conditions.append("i.id=?")
@@ -1062,13 +1093,14 @@ def state(db,user,day):
     all_items=stock(db)
     balances={i["id"]:int(Decimal(str(i["available"]))*1000) for i in all_items}
     wide=user["role"] in ("admin","caja","recepcion")
-    items=all_items if wide else [i for i in all_items if i["area"].casefold()==_area(user).casefold()]
+    assigned_areas=inventory_access_areas(user)
+    items=all_items if wide else [i for i in all_items if i["area"] in assigned_areas]
     allowed={i["id"] for i in items}
     can_order=user["role"] in ("admin","caja","atencion")
     can_prepare = _can_prepare(user)
     recipe_items = allowed
     if user["role"] == "recepcion" and can_prepare:
-        recipe_items = {i["id"] for i in items if i["area"].casefold() == _area(user).casefold()}
+        recipe_items = {i["id"] for i in items if i["area"] in assigned_areas}
     rules=[]
     for row in db.execute("SELECT * FROM inv_rules ORDER BY id"):
         if row["source_id"] in recipe_items and row["target_id"] in recipe_items:
@@ -1077,15 +1109,14 @@ def state(db,user,day):
             for key in ("source_qty","target_qty"):
                 rule[key]=num(rule[key])
             rules.append(rule)
-    area_names={i["area"] for i in items}
-    if wide:
-        area_names.update(DEFAULT_AREAS)
     result={"items":items,"lots":[r for r in batches(db) if r["item_id"] in allowed],
-            "areas":sorted(area_names),"categories":sorted({i["category"] for i in items}),
+            "areas":INVENTORY_AREAS if wide else assigned_areas,
+            "inventory_access_areas":assigned_areas,"categories":sorted({i["category"] for i in items}),
             "products":_products(db,balances) if can_order else [],
             "orders":_orders(db,user,balances),"preparation":_preparation(db,user),"rules":rules,"can_prepare":can_prepare,
             "movements":_history(db,user,{},recent=True)}
     if user["role"]=="admin":
+        result["staff_areas"]=STAFF_AREAS
         result["portion_groups"]=[dict(r) for r in db.execute("SELECT * FROM inv_portion_groups")]
         result["next_item_code"]=_next_item_code(db,1+max((i["id"] for i in all_items),default=0))
     if user["role"]=="area":
@@ -1256,17 +1287,17 @@ def init(db,demo=True):
     # Datos ficticios de apertura. La fecha se fija una vez en la primera instalación.
     # código, nombre, área, familia, unidad, mínimo, aviso, vida inicial, transformable, cantidad
     sample=[
-        ("POL-01","Pollo entero crudo","Parrilla","Aves","und",6,2,5,1,18),
-        ("POL-02","Cuarto de pollo asado","Parrilla","Preparados","porc",10,1,2,0,36),
-        ("PAP-01","Papa para freír","Cocina","Verduras","kg",8,3,12,0,32),
-        ("ENS-01","Ensalada de la casa","Cocina","Preparados","porc",8,1,2,0,40),
-        ("RES-01","Bistec de res","Parrilla","Carnes","kg",3,2,5,0,9),
-        ("ARR-01","Arroz cocido","Cocina","Preparados","kg",4,1,2,0,12),
-        ("POL-03","Pollo trozado","Cocina","Aves","kg",3,2,3,0,8),
+        ("POL-01","Pollo entero crudo","Brasas","Aves","und",6,2,5,1,18),
+        ("POL-02","Cuarto de pollo asado","Brasas","Preparados","porc",10,1,2,0,36),
+        ("PAP-01","Papa para freír","Orientales","Verduras","kg",8,3,12,0,32),
+        ("ENS-01","Ensalada de la casa","Orientales","Preparados","porc",8,1,2,0,40),
+        ("RES-01","Bistec de res","Parrillas","Carnes","kg",3,2,5,0,9),
+        ("ARR-01","Arroz cocido","Orientales","Preparados","kg",4,1,2,0,12),
+        ("POL-03","Pollo trozado","Orientales","Aves","kg",3,2,3,0,8),
         ("BEB-01","Chicha morada preparada","Barra","Bebidas","L",3,1,3,0,15),
         ("BEB-02","Gaseosa personal sellada","Barra","Bebidas","bot",12,10,90,0,10),
-        ("LIM-01","Detergente lavavajillas","Limpieza","Limpieza","L",2,0,None,0,6),
-        ("ATE-01","Servilletas","Atención","Servicio","und",100,0,None,0,500),
+        ("LIM-01","Detergente lavavajillas","Limpieza y Atención","Limpieza","L",2,0,None,0,6),
+        ("ATE-01","Servilletas","Limpieza y Atención","Servicio","und",100,0,None,0,500),
     ]
     first_day=date.fromisoformat(today())
     ids={}

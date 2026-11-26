@@ -73,10 +73,10 @@
   };
 
   function newWaste() {
-    const assigned=S.user.area || "Limpieza";
+    const assigned=S.inventory_access_areas;
     const lots=rows("lots").filter(x=>{
       const i=item(x.item_id);
-      return x.physical>0 && i && (admin() || i.area.toLowerCase()===assigned.toLowerCase());
+      return x.physical>0 && i && (admin() || assigned.includes(i.area));
     });
     const options=lots.map(x=>[x.id,`${label("LT",x.id)} · ${item(x.item_id).name} · ${fmt(x.physical)} ${item(x.item_id).unit}`]);
     modal("Reportar merma",select("lot","Lote afectado",options)+

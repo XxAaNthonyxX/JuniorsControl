@@ -253,7 +253,7 @@ async function refreshSession(){
    const notice=observeAlerts(fresh,false);
    if(notice)toast(notice);
    const editing=document.querySelector("#dialog").open||["INPUT","SELECT","TEXTAREA"].includes(document.activeElement.tagName);
-   if(!editing&&["atencion","comandas","alertas"].includes(route)){S=fresh;render()}
+   if(!editing&&["atencion","comandas","preparacion","alertas"].includes(route)){S=fresh;render()}
  }catch{}finally{checkingSession=false}
 }
 setInterval(refreshSession,30000);

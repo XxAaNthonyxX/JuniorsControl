@@ -22,6 +22,11 @@ def today():
     return datetime.now(LIMA).date().isoformat()
 
 
+def business_day(db):
+    row=db.execute("SELECT work_day FROM g_settings WHERE id=1").fetchone()
+    return row[0] if row and row[0] else today()
+
+
 def public(prefix, number):
     return f"{prefix}{number:04d}"
 
@@ -335,13 +340,13 @@ def _pending_cancel(db, order_id):
 
 
 def _dispatch_exists(db, order_id):
-    return db.execute("SELECT 1 FROM inv_dispatch WHERE order_id=?",(order_id,)).fetchone() is not None
+    return db.execute("SELECT 1 FROM inv_details WHERE sent_at IS NOT NULL AND order_id=?",(order_id,)).fetchone() is not None
 
 
 def _order_lines_delivered(db, order_id):
-    total = db.execute("SELECT COUNT(*) FROM inv_lines WHERE order_id=?",(order_id,)).fetchone()[0]
-    delivered = db.execute("SELECT COUNT(*) FROM inv_dispatch WHERE order_id=? AND status=N'Entregado'",(order_id,)).fetchone()[0]
-    return bool(total) and total == delivered
+    row=db.execute("""SELECT COUNT(*),COUNT(CASE WHEN status='Entregado' THEN 1 END)
+                      FROM inv_details WHERE order_id=?""",(order_id,)).fetchone()
+    return bool(row[0]) and row[0]==row[1]
 
 def _get_order(db,p):
     order = db.execute("SELECT * FROM inv_orders WHERE id=?",(_id(p.get("id")),)).fetchone()
@@ -355,65 +360,42 @@ def _check_version(order, p):
         raise ValueError("El pedido cambió en otra sesión. Actualiza antes de continuar.")
 
 
-def _save_order(db,user,p,*,exchange=False):
-    _role(user,"atencion","caja","admin")
-    number_table = None if exchange else _table_number(p.get("table_number", p.get("table_name")))
-    table = _text(p.get("table_name"), "mesa o referencia", 60) if exchange else f"Mesa {number_table}"
-    rows = p.get("lines")
-    if not isinstance(rows,list) or not 1<=len(rows)<=100:
-        raise ValueError("Selecciona al menos un producto y hasta cien líneas.")
-    requested={}
+def _validate_details(rows,existing):
+    seen=set()
+    for index,line in enumerate(rows,1):
+        number=_id(line.get("detail_no",index))
+        if number in seen:
+            raise ValueError("Número de detalle repetido.")
+        seen.add(number)
+        prior=existing.get(number)
+        if prior and prior["status"]=="Entregado" and (prior["product_id"],prior["qty"])!=(_id(line["product_id"]),int(line["qty"])):
+            raise ValueError("Un detalle entregado no se puede modificar.")
+    if existing.keys()-seen:
+        raise ValueError("Cada detalle debe conservar un producto. Usa Cambiar producto.")
+
+
+def _reserved_quantities(rows,existing):
+    totals=defaultdict(int)
     for line in rows:
-        if not isinstance(line,dict):
-            raise ValueError("Revisa las líneas del pedido.")
-        product_id=_id(line.get("product_id"))
-        if product_id in requested:
-            raise ValueError("Agrupa los productos repetidos en una sola línea.")
-        requested[product_id]=_scaled(line.get("qty"),1,"Unidades del plato",high=10000)
-    old_lines = {}
+        prior=existing.get(line["detail_no"])
+        if prior and prior["sent_at"]:
+            totals[prior["sent_product"]]+=prior["sent_qty"]
+        else:
+            totals[_id(line["product_id"])]+=int(line["qty"])
+    return totals
+
+
+def _reserve_lines(db,order,requested,old_lines,status):
     unchanged=set()
-    if not exchange:
-        day_check=today()
-        conflict=db.execute("""SELECT TOP(1) number FROM inv_orders
-                  WHERE day=? AND status IN ('Reservado','Por revisar')
-                  AND (table_number=? OR (table_number IS NULL AND
-                        (table_name IN (?,?) OR (table_name LIKE N'Mesa %' AND
-                          TRY_CONVERT(int,SUBSTRING(table_name,6,100))=?))))
-                  AND id<>? ORDER BY id""",
-                  (day_check,number_table,f"Mesa {number_table}",str(number_table),number_table,_id(p["id"]) if p.get("id") else 0)).fetchone()
-        if conflict:
-            raise ValueError(f"La mesa {number_table} está OCUPADA por {public('C',conflict['number'])} en la jornada actual.")
-    if p.get("id"):
-        o = _get_order(db,p)
-        if o["status"] not in ("Reservado","Por revisar"):
-            raise ValueError("Este pedido ya se cerró.")
-        if _pending_cancel(db,o["id"]):
-            raise ValueError("La solicitud de cancelación está pendiente de aprobación.")
-        if o["day"] != today():
-            raise ValueError("Solo puedes modificar comandas de la jornada actual.")
-        _check_version(o,p)
-        order=o["id"]
-        old_lines={l["product_id"]:l for l in db.execute("SELECT * FROM inv_lines WHERE order_id=?",(order,))}
-        sent={r["product_id"] for r in db.execute("SELECT product_id FROM inv_dispatch WHERE order_id=?",(order,))}
-        for pid in sent:
-            if requested.get(pid) != old_lines[pid]["qty"]:
-                raise ValueError("Un producto enviado a preparación ya no se puede modificar. Solicita asistencia para su anulación.")
-        # Primero libera todas las líneas retiradas o editadas para que los cambios
-        # puedan intercambiar insumos. Las demás conservan sus lotes originales.
-        for product_id,line in old_lines.items():
-            if o["status"]=="Reservado" and requested.get(product_id)==line["qty"]:
-                unchanged.add(product_id)
-                continue
-            _release(db,order,product_id)
-            if product_id not in requested:
-                db.execute("DELETE FROM inv_lines WHERE order_id=? AND product_id=?",(order,product_id))
-        db.execute("UPDATE inv_orders SET table_name=?,table_number=?,status='Reservado',version=version+1 WHERE id=?",(table,number_table,order))
-    else:
-        timestamp=now()
-        day=timestamp[:10]
-        number=_next_order_number(db,day)
-        order=db.execute("""INSERT INTO inv_orders(table_name,table_number,status,created,operator,user_id,day,number) OUTPUT INSERTED.id
-                            VALUES(?,?,'Reservado',?,?,?,?,?)""",(table,number_table,timestamp,user["name"],user["id"],day,number)).lastrowid
+    # Primero libera todas las líneas retiradas o editadas para que los cambios
+    # puedan intercambiar insumos. Las demás conservan sus lotes originales.
+    for product_id,line in old_lines.items():
+        if status=="Reservado" and requested.get(product_id)==line["qty"]:
+            unchanged.add(product_id)
+            continue
+        _release(db,order,product_id)
+        if product_id not in requested:
+            db.execute("DELETE FROM inv_lines WHERE order_id=? AND product_id=?",(order,product_id))
     for product_id,n in requested.items():
         if product_id in unchanged:
             continue
@@ -433,6 +415,72 @@ def _save_order(db,user,p,*,exchange=False):
             for lot,take,_ in _plan(db,item,amount*n):
                 db.execute("UPDATE inv_lots SET reserved=reserved+? WHERE id=?", (take,lot))
                 db.execute("INSERT INTO inv_alloc(order_id,product_id,lot_id,amount) VALUES(?,?,?,?)",(order,product_id,lot,take))
+
+
+def _save_order(db,user,p,*,exchange=False):
+    _role(user,"atencion","caja","admin")
+    number_table = None if exchange else _table_number(p.get("table_number", p.get("table_name")))
+    table = _text(p.get("table_name"), "mesa o referencia", 60) if exchange else f"Mesa {number_table}"
+    rows = p.get("lines")
+    if not isinstance(rows,list) or not rows:
+        raise ValueError("Selecciona al menos un producto.")
+    requested={}
+    for line in rows:
+        if not isinstance(line,dict):
+            raise ValueError("Revisa las líneas del pedido.")
+        product_id=_id(line.get("product_id"))
+        line["qty"]=_scaled(line.get("qty"),1,"Unidades del plato",high=10000)
+        if "detail_no" in line:
+            line["detail_no"]=_id(line["detail_no"])
+        requested[product_id]=requested.get(product_id,0)+line["qty"]
+    old_lines = {}
+    if not exchange:
+        day_check=_get_order(db,p)["day"] if p.get("id") else business_day(db)
+        conflict=db.execute("""SELECT TOP(1) number FROM inv_orders
+                  WHERE day=? AND status IN ('Reservado','Por revisar')
+                  AND (table_number=? OR (table_number IS NULL AND
+                        (table_name IN (?,?) OR (table_name LIKE N'Mesa %' AND
+                          TRY_CONVERT(int,SUBSTRING(table_name,6,100))=?))))
+                  AND id<>? ORDER BY id""",
+                  (day_check,number_table,f"Mesa {number_table}",str(number_table),number_table,_id(p["id"]) if p.get("id") else 0)).fetchone()
+        if conflict:
+            raise ValueError(f"La mesa {number_table} está OCUPADA por {public('C',conflict['number'])} en la jornada actual.")
+    if p.get("id"):
+        o = _get_order(db,p)
+        if o["status"] not in ("Reservado","Por revisar"):
+            raise ValueError("Este pedido ya se cerró.")
+        if _pending_cancel(db,o["id"]):
+            raise ValueError("La solicitud de cancelación está pendiente de aprobación.")
+        _check_version(o,p)
+        order=o["id"]
+        old_lines={l["product_id"]:l for l in db.execute("SELECT * FROM inv_lines WHERE order_id=?",(order,))}
+        details={r["detail_no"]:dict(r) for r in db.execute("SELECT * FROM inv_details WHERE order_id=?",(order,))}
+        if details and p.get("version") is None:
+            raise ValueError("Actualiza la comanda antes de editarla.")
+        if details and not all("detail_no" in line for line in rows):
+            raise ValueError("Actualiza la aplicación antes de editar los detalles.")
+        _validate_details(rows,details)
+        requested=_reserved_quantities(rows,details)
+        db.execute("UPDATE inv_orders SET table_name=?,table_number=?,status='Reservado',version=version+1 WHERE id=?",(table,number_table,order))
+    else:
+        timestamp=now()
+        day=business_day(db)
+        if p.get("expected_day",day)!=day:
+            raise ValueError("Cambió la jornada. Actualiza la comanda antes de registrarla.")
+        number=_next_order_number(db,day)
+        order=db.execute("""INSERT INTO inv_orders(table_name,table_number,status,created,operator,user_id,day,number) OUTPUT INSERTED.id
+                            VALUES(?,?,'Reservado',?,?,?,?,?)""",(table,number_table,timestamp,user["name"],user["id"],day,number)).lastrowid
+    if not p.get("id"):
+        details={}
+        _validate_details(rows,details)
+    _reserve_lines(db,order,requested,old_lines,o["status"] if p.get("id") else "Reservado")
+    for index,line in enumerate(rows,1):
+        number=_id(line.get("detail_no",index))
+        args=(_id(line["product_id"]),int(line["qty"]),order,number)
+        if number in details:
+            db.execute("UPDATE inv_details SET product_id=?,qty=? WHERE order_id=? AND detail_no=?",args)
+        else:
+            db.execute("INSERT INTO inv_details(product_id,qty,order_id,detail_no) VALUES(?,?,?,?)",args)
     _event(db,user,order,"Modificado" if old_lines else "Reservado")
     saved=db.execute("SELECT number,day FROM inv_orders WHERE id=?",(order,)).fetchone()
     return {"id":order,"code":public("C",saved["number"]),"day":saved["day"]}
@@ -456,7 +504,16 @@ def _pay(db,user,p,*,exchange=False):
                         WHERE a.order_id=? GROUP BY a.lot_id,l.expiry""",(o["id"],)).fetchall()
     if not parts or any(expiry and expiry<today() for _,_,expiry in parts):
         raise ValueError("La reserva venció. Revisa los insumos y vuelve a guardar el pedido.")
-    sale_id=db.execute("INSERT INTO inv_sales(order_id) OUTPUT INSERTED.id VALUES(?)",(o["id"],)).lastrowid
+    method=p.get("payment_method","Efectivo" if not exchange else "Cambio")
+    if method not in ("Efectivo","Yape","Tarjeta") and not exchange:
+        raise ValueError("Selecciona un medio de pago válido.")
+    day=business_day(db)
+    if p.get("expected_day",day)!=day:
+        raise ValueError("Cambió la jornada de caja. Actualiza antes de cobrar.")
+    amount=db.execute("SELECT SUM(qty*price) FROM inv_lines WHERE order_id=?",(o["id"],)).fetchone()[0]
+    if p.get("expected_cents",amount)!=amount:
+        raise ValueError("Cambió el importe. Revisa el total antes de cobrar.")
+    sale_id=db.execute("INSERT INTO inv_sales(order_id,payment_method,cash_day) OUTPUT INSERTED.id VALUES(?,?,?)",(o["id"],method,day)).lastrowid
     sale_code=public("V",sale_id)
     for lot,amount,_ in parts:
         db.execute("UPDATE inv_lots SET reserved=reserved-? WHERE id=?",(amount,lot))
@@ -472,7 +529,7 @@ def _cancel(db,user,p):
     o=_get_order(db,p)
     if _pending_cancel(db,o["id"]):
         raise ValueError("La cancelación pendiente debe aprobarse o rechazarse primero.")
-    if db.execute("SELECT 1 FROM inv_dispatch WHERE order_id=? AND status=N'Entregado'",(o["id"],)).fetchone():
+    if db.execute("SELECT 1 FROM inv_details WHERE sent_at IS NOT NULL AND order_id=? AND status=N'Entregado'",(o["id"],)).fetchone():
         raise ValueError("La comanda tiene productos entregados. Solicita una devolución o ajuste supervisado.")
     if o["status"]=="Cancelado":
         return {"id":o["id"]}
@@ -508,8 +565,8 @@ def _refund(db,user,p):
         grouped[r["item_id"]].append(r)
     if not restock.issubset(grouped):
         raise ValueError("Solo se pueden devolver insumos de esta venta.")
-    return_id=db.execute("""INSERT INTO inv_returns(order_id,product_id,qty,reason,at,operator) OUTPUT INSERTED.id
-                            VALUES(?,?,?,?,?,?)""",(o["id"],pid,n,reason,now(),user["name"])).lastrowid
+    return_id=db.execute("""INSERT INTO inv_returns(order_id,product_id,qty,reason,at,operator,cash_day) OUTPUT INSERTED.id
+                            VALUES(?,?,?,?,?,?,?)""",(o["id"],pid,n,reason,now(),user["name"],business_day(db))).lastrowid
     return_code=public("DV",return_id)
     for item,parts in grouped.items():
         needed=(sum(r["amount"] for r in parts)//line["qty"])*n
@@ -572,18 +629,23 @@ def _send_to_areas(db,user,p):
     _role(user,"admin","caja","atencion")
     o=_get_order(db,p)
     _check_version(o,p)
-    if o["status"] != "Reservado" or o["day"] != today() or _pending_cancel(db,o["id"]):
-        raise ValueError("La comanda debe estar abierta, sin solicitud de cancelación y en la jornada actual.")
-    lines=db.execute("""SELECT l.product_id,p.prep_area FROM inv_lines l
-                        JOIN inv_products p ON p.id=l.product_id
-                        LEFT JOIN inv_dispatch d ON d.order_id=l.order_id AND d.product_id=l.product_id
-                        WHERE l.order_id=? AND d.order_id IS NULL""",(o["id"],)).fetchall()
+    if o["status"] != "Reservado" or _pending_cancel(db,o["id"]):
+        raise ValueError("La comanda debe estar abierta, sin solicitud de cancelación.")
+    details=[dict(r) for r in db.execute("""SELECT d.*,p.prep_area FROM inv_details d JOIN inv_products p
+                   ON p.id=d.product_id WHERE order_id=?""",(o["id"],))]
+    lines=[d for d in details if (d["product_id"],d["qty"])!=(d["sent_product"],d["sent_qty"])]
     if not lines:
-        raise ValueError("Esta comanda no tiene productos nuevos por enviar a preparación.")
+        raise ValueError("No hay detalles pendientes de envío.")
+    totals=defaultdict(int)
+    for d in details:
+        totals[d["product_id"]]+=d["qty"]
+    old={l["product_id"]:l for l in db.execute("SELECT * FROM inv_lines WHERE order_id=?",(o["id"],))}
+    _reserve_lines(db,o["id"],totals,old,o["status"])
     at=now()
-    for line in lines:
-        db.execute("""INSERT INTO inv_dispatch(order_id,product_id,area,status,sent_at)
-                      VALUES(?,?,?,N'En cola',?)""",(o["id"],line["product_id"],_prep_area(line["prep_area"]),at))
+    for d in lines:
+        db.execute("""UPDATE inv_details SET sent_product=product_id,sent_qty=qty,area=?,status='En cola',
+                   sent_at=?,started_at=NULL,ready_at=NULL,revision=revision+1 WHERE order_id=? AND detail_no=?""",
+                   (_prep_area(d["prep_area"]),at,o["id"],d["detail_no"]))
     db.execute("UPDATE inv_orders SET version=version+1 WHERE id=?",(o["id"],))
     _event(db,user,o["id"],"Enviado a preparación",f"{len(lines)} productos")
     return {"id":o["id"],"enviados":len(lines)}
@@ -593,11 +655,14 @@ def _advance_preparation(db,user,p):
     _role(user,"admin","area")
     o=_get_order(db,p)
     pid=_id(p.get("product_id"))
-    task=db.execute("SELECT * FROM inv_dispatch WHERE order_id=? AND product_id=?",(o["id"],pid)).fetchone()
+    number=_id(p.get("detail_no"))
+    task=db.execute("SELECT * FROM inv_details WHERE order_id=? AND detail_no=? AND sent_product=?",(o["id"],number,pid)).fetchone()
     if not task:
         raise ValueError("El producto no fue enviado a preparación.")
     if not _may_work(user,task["area"]):
         raise PermissionError("No puedes consultar ni entregar pedidos de otra área.")
+    if task["revision"]!=p.get("revision"):
+        raise ValueError("Este envío cambió. Actualiza la cola antes de continuar.")
     action=p.get("step")
     transitions={"preparar":("En cola","Preparando","started_at"),
                  "listo":("Preparando","Listo","ready_at"),
@@ -612,11 +677,14 @@ def _advance_preparation(db,user,p):
     if o["status"]!="Reservado" or _pending_cancel(db,o["id"]):
         raise ValueError("La comanda no permite acciones de preparación.")
     # column derives from a constant server-side mapping, never from the request.
-    changed=db.execute(f"UPDATE inv_dispatch SET status=?,{column}=?,delivered_by=CASE WHEN ?='entregar' THEN ? ELSE delivered_by END WHERE order_id=? AND product_id=? AND status=?",
-               (after,now(),action,user["name"],o["id"],pid,before)).rowcount
+    changed=db.execute(f"UPDATE inv_details SET status=?,{column}=?,delivered_by=CASE WHEN ?='entregar' THEN ? ELSE delivered_by END WHERE order_id=? AND detail_no=? AND status=?",
+               (after,now(),action,user["name"],o["id"],number,before)).rowcount
     if not changed:
         raise ValueError("Otro empleado ya actualizó el estado.")
     db.execute("UPDATE inv_orders SET version=version+1 WHERE id=?",(o["id"],))
+    if action=="entregar":
+        # La entrega confirma exactamente lo que recibió el área, incluso si existe un cambio sin enviar.
+        db.execute("UPDATE inv_details SET product_id=sent_product,qty=sent_qty WHERE order_id=? AND detail_no=?",(o["id"],number))
     _event(db,user,o["id"],after,f"{task['area']} · producto {pid}")
     return {"id":o["id"],"estado":after}
 
@@ -630,7 +698,7 @@ def _ask_cancel(db,user,p):
     if _pending_cancel(db,o["id"]):
         raise ValueError("Ya existe una solicitud de cancelación pendiente.")
     reason=_text(p.get("reason"),"motivo",500)
-    if db.execute("SELECT 1 FROM inv_dispatch WHERE order_id=? AND status=N'Entregado'",(o["id"],)).fetchone():
+    if db.execute("SELECT 1 FROM inv_details WHERE sent_at IS NOT NULL AND order_id=? AND status=N'Entregado'",(o["id"],)).fetchone():
         raise ValueError("Hay productos entregados; consulta con Caja para el ajuste correspondiente.")
     cid=db.execute("""INSERT INTO inv_cancel_requests(order_id,status,reason,requester,requested_at)
                        OUTPUT INSERTED.id VALUES(?,'Pendiente',?,?,?)""",(o["id"],reason,user["name"],now())).lastrowid
@@ -647,7 +715,7 @@ def _decide_cancel(db,user,p):
     approved=p.get("approve") is True
     if approved:
         # Una entrega física exige devolución supervisada, no liberar reservas ficticiamente.
-        if db.execute("SELECT 1 FROM inv_dispatch WHERE order_id=? AND status=N'Entregado'",(o["id"],)).fetchone():
+        if db.execute("SELECT 1 FROM inv_details WHERE sent_at IS NOT NULL AND order_id=? AND status=N'Entregado'",(o["id"],)).fetchone():
             raise ValueError("No se puede cancelar: existen productos entregados.")
         _release(db,o["id"])
         db.execute("UPDATE inv_orders SET status='Cancelado',version=version+1 WHERE id=?",(o["id"],))
@@ -660,18 +728,18 @@ def _decide_cancel(db,user,p):
 def _preparation(db,user):
     if user["role"] not in ("admin","area"):
         return []
-    query="""SELECT d.order_id,d.product_id,d.area,d.status,d.sent_at,d.started_at,d.ready_at,
-            d.delivered_at,d.delivered_by,o.number,o.day,o.table_number,l.name,l.qty,
+    query="""SELECT d.order_id,d.detail_no,d.revision,d.sent_product AS product_id,d.area,d.status,d.sent_at,d.started_at,d.ready_at,
+            d.delivered_at,d.delivered_by,o.number,o.day,o.table_number,l.name,d.sent_qty AS qty,
             CASE WHEN EXISTS (SELECT 1 FROM inv_cancel_requests cr WHERE cr.order_id=o.id AND cr.status='Pendiente')
                  THEN 1 ELSE 0 END AS cancel_pending
-            FROM inv_dispatch d JOIN inv_orders o ON o.id=d.order_id
-            JOIN inv_lines l ON l.order_id=d.order_id AND l.product_id=d.product_id
+            FROM inv_details d JOIN inv_orders o ON o.id=d.order_id
+            JOIN inv_lines l ON l.order_id=d.order_id AND l.product_id=d.sent_product
             WHERE o.status='Reservado'"""
     params=[]
     if user["role"]=="area":
         query+=" AND d.area=?"
         params.append(_area(user))
-    query+=" ORDER BY d.sent_at,d.order_id,d.product_id"
+    query+=" ORDER BY d.sent_at,d.order_id,d.detail_no"
     result=[]
     for r in db.execute(query,params):
         x=dict(r);x["code"]=public("C",x["number"])
@@ -759,7 +827,9 @@ def _orders(db,user,balances):
         if not attending:
             r.update(sale_code=None,returns=[])
     if not attending:
-        for sale_id,order_id in db.execute("SELECT id,order_id FROM inv_sales"):
+        for sale_id,order_id,method,day in db.execute("SELECT id,order_id,payment_method,cash_day FROM inv_sales"):
+            rows[order_id]["cash_day"]=day
+            rows[order_id]["payment_method"]=method or "Sin especificar"
             rows[order_id]["sale_code"]=public("V",sale_id)
         linked={}
         exchanges=db.execute("""SELECT x.id,x.return_id,x.difference_cents,s.id AS sale_id,s.order_id AS new_order,
@@ -775,7 +845,7 @@ def _orders(db,user,balances):
                 "difference":e["difference_cents"]/100}
             replacement["exchange_origin"]={"exchange_code":code,"return_code":public("DV",e["return_id"]),
                 "id":original["id"],"code":original["code"],"day":original["day"],"sale_code":original["sale_code"]}
-        credits=db.execute("""SELECT r.id,r.order_id,r.product_id,r.qty,r.reason,r.at,r.operator,l.name
+        credits=db.execute("""SELECT r.id,r.order_id,r.product_id,r.qty,r.reason,r.at,r.cash_day,r.operator,l.name
                               FROM inv_returns r JOIN inv_lines l ON l.order_id=r.order_id AND l.product_id=r.product_id
                               ORDER BY r.id""")
         for credit in credits:
@@ -783,9 +853,16 @@ def _orders(db,user,balances):
             detail.update(linked.get(credit["id"],{}))
             detail["code"]=public("DV",detail.pop("id"))
             rows[detail.pop("order_id")]["returns"].append(detail)
-    queue={}
-    for d in db.execute("SELECT order_id,product_id,area,status,sent_at,started_at,ready_at,delivered_at,delivered_by FROM inv_dispatch"):
-        if d["order_id"] in rows: queue[(d["order_id"],d["product_id"])]=dict(d)
+    for order in rows.values():
+        order["details"]=[]
+    for row in db.execute("""SELECT d.*,COALESCE(l.name,p.name) AS name,COALESCE(l.price,p.price) AS price FROM inv_details d
+          JOIN inv_products p ON p.id=d.product_id LEFT JOIN inv_lines l ON l.order_id=d.order_id
+          AND l.product_id=d.product_id ORDER BY d.order_id,d.detail_no"""):
+        if row["order_id"] in rows:
+            d=dict(row)
+            d["price"]/=100
+            d["pending"]=(d["product_id"],d["qty"])!=(d["sent_product"],d["sent_qty"])
+            rows[d["order_id"]]["details"].append(d)
     pending={r["order_id"]:dict(r) for r in db.execute("SELECT order_id,id,reason,requested_at FROM inv_cancel_requests WHERE status='Pendiente'")}
     for o in rows.values():
         o["cancel_request"]=pending.get(o["id"])
@@ -808,6 +885,10 @@ def _orders(db,user,balances):
         key=(oid,pid)
         units=balances[item_id]//unit_amount
         capacity[key]=min(units,capacity.get(key,units))
+    detail_groups=defaultdict(list)
+    for order in rows.values():
+        for d in order["details"]:
+            detail_groups[(order["id"],d["product_id"])].append(d)
     for row in db.execute(line_sql+" ORDER BY l.order_id,l.product_id"):
         line=dict(row)
         order=rows[line.pop("order_id")]
@@ -816,14 +897,16 @@ def _orders(db,user,balances):
         line["price"]/=100
         key=(order["id"],line["product_id"])
         line["ingredients"]=ingredients[key]
-        line["prep"]=queue.get(key)
-        line["prep_status"]=line["prep"]["status"] if line["prep"] else "Sin enviar"
+        group=detail_groups[key]
+        line["prep_status"]="Entregado" if group and all(d["status"]=="Entregado" for d in group) else "Pendiente"
         if key in capacity:
             line["max_qty"]=capacity[key]+(line["qty"] if order["status"]=="Reservado" else 0)
         order["lines"].append(line)
     for r in rows.values():
         r["gross"]/=100
         r["total"]/=100
+        if r["status"] in ("Reservado","Por revisar"):
+            r["total"]=sum(round(d["price"]*100)*d["qty"] for d in r["details"])/100
     return list(rows.values())
 
 

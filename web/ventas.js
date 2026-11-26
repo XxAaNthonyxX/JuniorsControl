@@ -12,22 +12,22 @@ function ventasPeriodo(orders,start,end){
  }
  const inRange=at=>at&&at.slice(0,10)>=start&&at.slice(0,10)<=end;
  for(const o of orders){
-   if(!o.paid_at||o.paid_at.slice(0,10)>end)continue;
+   if(!o.paid_at)continue;
    const credits=new Map();
-   if(inRange(o.paid_at)){
+   if(inRange(o.cash_day||o.paid_at)){
      let gross=0;
      for(const line of o.lines){
        const amount=Math.round(line.price*100)*line.qty;
        gross+=amount;addLine(line,line.qty,amount,false);
      }
      report.gross+=gross;report.count++;
-     report.entries.push({at:o.paid_at,kind:"Cobro",code:o.sale_code,order:o.code,day:o.day,mesa:o.table_name,who:o.cashier,amount:gross,id:o.id});
+     report.entries.push({at:o.paid_at,kind:"Cobro",method:o.payment_method,code:o.sale_code,order:o.code,day:o.day,mesa:o.table_name,who:o.cashier,amount:gross,id:o.id});
    }
    for(const r of o.returns||[]){
      const line=o.lines.find(l=>l.product_id===r.product_id);
      if(!line)continue;
      credits.set(line.product_id,(credits.get(line.product_id)||0)+r.qty);
-     if(!inRange(r.at))continue;
+     if(!inRange(r.cash_day||r.at))continue;
      const amount=Math.round(line.price*100)*r.qty;
      report.refunded+=amount;addLine(line,r.qty,amount,true);
      report.entries.push({at:r.at,kind:"Devolución",code:r.code,order:o.code,day:o.day,mesa:o.table_name,who:r.operator,amount:-amount,id:o.id});
@@ -55,13 +55,28 @@ function ventasPeriodo(orders,start,end){
    const r=ventasPeriodo(S.orders,from,to);
    const metric=(label,value)=>`<div class="metric"><span>${h(label)}</span><b class="value">${h(value)}</b></div>`;
    const records=r.entries.map(e=>[
-      `<b>${h(e.code)}</b><small class="sub">${h(e.kind)}</small>`,
+      `<b>${h(e.code)}</b><small class="sub">${h(e.kind)+(e.method?" · "+h(e.method):"")}</small>`,
       h(e.at),`<b>${h(e.order)}</b><small class="sub">${h(displayDate(e.day))}</small>`,
       h(e.mesa),h(e.who),money(e.amount)]);
    const products=r.products.map(p=>[h(p.name),fmt(p.sold),fmt(p.returned),money(p.amount)]);
    const filters=`<form id="ventas-filtro" class="actions filters">${input("desde","Desde","date",from,"required")}${input("hasta","Hasta","date",to,"required")}<button class="btn primary">Consultar</button></form>`;
-   return panel("Período de caja",filters)+`<div class="metrics">${metric("Ventas cobradas",r.count)}${metric("Cobros",money(r.gross))}${metric("Devoluciones",money(r.refunded))}${metric("Ingreso neto",money(r.net))}</div>`+
+   const expenses=(S.cash_expenses||[]).filter(e=>e.day>=from&&e.day<=to);
+   const spent=kind=>expenses.filter(e=>!e.void_at&&e.kind===kind).reduce((sum,e)=>sum+e.cents,0);
+   const result=r.net-spent("Personal")-spent("Mercado");
+   const addExpense=()=>modal("Registrar gasto",input("day","Jornada","date",S.today,"readonly required")+
+     select("kind","Tipo",[["Personal","Personal"],["Mercado","Mercado"]])+input("reference","Referencia","text","","required")+
+     input("concept","Concepto","text","","required")+input("amount","Importe (S/)","number","","min=0.01 step=0.01 required"),
+     values=>run("gestion.cash_expense",values,"Gasto registrado"));
+   const expenseRows=expenses.map(e=>[h(e.day),h(e.kind),h(e.reference),h(e.concept),money(e.cents),h(e.actor),
+     e.void_at?h("Anulado · "+e.void_reason+" · "+e.void_by):e.day!==S.today?"Registrado":button("Anular",()=>modal("Anular gasto",input("reason","Motivo","text","","required"),
+       v=>run("gestion.void_expense",{id:e.id,day:e.day,reason:v.reason},"Gasto anulado")),"link")]);
+   const methods=["Efectivo","Yape","Tarjeta","Sin especificar","Cambio"].map(m=>[m,r.entries.filter(e=>e.kind==="Cobro"&&e.method===m).reduce((n,e)=>n+e.amount,0)]).filter(([,amount])=>amount);
+   const jornada=button("Cambiar jornada",()=>modal("Jornada de caja",input("day","Fecha de trabajo (vacía para usar la fecha actual)","date",S.today),
+     async v=>{await run("gestion.cash_day",v,"Jornada actualizada");from=S.today;to=S.today;render()}),"secondary");
+   return panel("Período de caja",filters,jornada)+`<div class="metrics">${metric("Ventas cobradas",r.count)}${metric("Cobros",money(r.gross))}${metric("Devoluciones",money(r.refunded))}${metric("Ingreso neto",money(r.net))}</div>`+
       (r.unlocated?`<p class="notice">El historial anterior contiene ${money(r.unlocated)} en devoluciones sin fecha registrada. El informe incluye los movimientos con fecha verificable.</p>`:"")+
+      panel("Arqueo de caja",`<div class="metrics">${metric("Ventas netas",money(r.net))}${metric("Personal",money(spent("Personal")))}${metric("Mercado",money(spent("Mercado")))}${metric(result<0?"Pérdida":result>0?"Ganancia":"Resultado",money(result))}</div>`+table(["Medio de pago","Cobros"],methods.map(([m,v])=>[h(m),money(v)]),"Sin cobros"))+
+      panel("Gastos de caja",table(["Fecha","Tipo","Referencia","Concepto","Importe","Responsable","Estado"],expenseRows,"Sin gastos"),button("Registrar gasto",addExpense,"primary"))+
       panel("Movimientos de caja",table(["Documento","Fecha de operación","Comanda","Mesa o referencia","Responsable","Importe"],records,"Sin cobros ni devoluciones en este período."),
             records.length?button("Descargar CSV",()=>downloadReport(r)):"")+
       panel("Ventas por producto",table(["Producto","Unidades cobradas","Devueltas","Importe neto"],products,"Sin productos en el período seleccionado."));

@@ -409,6 +409,33 @@ def act(db, user, action, payload):
     }
     if action in handlers:
         result = handlers[action](db,user,payload)
+    elif action=="gestion.cash_day":
+        inv._role(user,"admin","caja")
+        day=date.fromisoformat(payload["day"]).isoformat() if payload.get("day") else None
+        db.execute("UPDATE g_settings SET work_day=? WHERE id=1",(day,))
+        return {"day":day or inv.today()}
+    elif action in {"gestion.cash_expense","gestion.void_expense"}:
+        inv._role(user,"admin","caja")
+        day=inv.business_day(db)
+        if payload.get("day")!=day:
+            raise ValueError("La jornada cambió. Actualiza Caja antes de continuar.")
+        if action=="gestion.void_expense":
+            reason=inv._text(payload.get("reason"),"motivo",300)
+            if not db.execute("UPDATE cash_expenses SET void_reason=?,void_by=?,void_at=? WHERE id=? AND day=? AND void_at IS NULL",
+                              (reason,user["name"],inv.now(),inv._id(payload.get("id")),day)).rowcount:
+                raise ValueError("El gasto ya fue anulado o no existe.")
+        else:
+            kind=payload.get("kind")
+            if kind not in ("Personal","Mercado"):
+                raise ValueError("Tipo de gasto inválido.")
+            day=date.fromisoformat(payload.get("day","")).isoformat()
+            reference=inv._text(payload.get("reference"),"referencia",100)
+            if db.execute("SELECT id FROM cash_expenses WHERE day=? AND kind=? AND reference=? AND void_at IS NULL",(day,kind,reference)).fetchone():
+                raise ValueError("La referencia ya está registrada para esta jornada.")
+            db.execute("INSERT INTO cash_expenses(day,kind,reference,concept,cents,actor) VALUES(?,?,?,?,?,?)",
+                       (day,kind,reference,inv._text(payload.get("concept"),"concepto",300),
+                        inv._scaled(payload.get("amount"),100,"Importe"),user["name"]))
+        return {}
     elif action in {"gestion.fund","gestion.schedule"}:
         result = _configure(db,user,payload,funds=action=="gestion.fund")
     elif action == "gestion.report":
@@ -432,6 +459,8 @@ def state(db, user):
     receiving = user["role"] in {"admin","recepcion"}
     result = {"receipts":[], "wastes":[], "incidents":[], "alerts":[], "purchases":[],
               "reports":[], "budget":None, "schedule":None}
+    if user["role"] in ("admin","caja"):
+        result["cash_expenses"]=[dict(r) for r in db.execute("SELECT * FROM cash_expenses ORDER BY day DESC,id DESC")]
     if receiving:
         for r in db.execute("""SELECT r.id,r.item_id,i.name item_name,i.unit,r.supplier,r.qty_m,
                 r.approved_m,r.received_m,r.reason,r.created,r.actor,r.reviewed_at,r.reviewer,r.unit_cents,

@@ -61,6 +61,12 @@ def copy_tables(source, destination):
             raise ValueError(f"Falta dbo.{name} en el destino. Instala primero el esquema de SQL Server.")
         local = [r[1] for r in source.execute(f"PRAGMA table_info([{name}])")]
         expected = {c[0] for c in columns}
+        if name == "inv_sales":
+            expected -= {"payment_method","cash_day"}
+        if name=="inv_returns":
+            expected.discard("cash_day")
+        if name=="g_settings":
+            expected.discard("work_day")
         if name == "users":
             expected -= {"username", "deleted"}
         if name == "auth_invites":
@@ -101,6 +107,8 @@ def copy_tables(source, destination):
         verified = destination.execute(f"SELECT COUNT_BIG(*) FROM dbo.[{name}]").fetchone()[0]
         if verified != counts[name]:
             raise ValueError(f"Recuento incorrecto en {name}. Se cancela la migración.")
+    destination.execute("""INSERT inv_details(order_id,detail_no,product_id,qty) SELECT order_id,
+        ROW_NUMBER() OVER(PARTITION BY order_id ORDER BY product_id),product_id,qty FROM inv_lines""")
     return counts
 
 if __name__ == "__main__":

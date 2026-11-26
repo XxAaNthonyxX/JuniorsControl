@@ -83,9 +83,16 @@
       return;
     }
     const options=lots.map(x=>[x.id,`${label("LT",x.id)} · ${item(x.item_id).name} · ${fmt(x.available)} ${item(x.item_id).unit} disponibles`]);
+    const calendarToday=S.calendar_today||S.today;
+    const activeDay=S.today;
+    const latestDate=calendarToday>activeDay?calendarToday:activeDay;
+    const todayButton=calendarToday!==activeDay?button(`Usar la fecha de hoy (${date(calendarToday)})`,()=>{
+      dateField.value=calendarToday;
+      dateField.setCustomValidity("");
+    },"link"):"";
     const dialog=modal("Reportar merma",select("lot","Lote afectado",options)+
       input("qty","Cantidad afectada","number","",qtyAttrs)+
-      input("occurred_on","Fecha de la merma","date",S.today,'required max="'+e(S.today)+'"')+
+      input("occurred_on","Fecha de la merma","date",activeDay,'required max="'+e(latestDate)+'"')+todayButton+
       input("reason","Motivo y detalle del descarte","text","","required maxlength=500")+
       note("La cantidad quedará reservada hasta que Administración revise la solicitud."),
       v=>{
@@ -94,6 +101,11 @@
         return run("gestion.waste",{item_id:lot.item_id,lot_id:lot.id,qty:v.qty,occurred_on:v.occurred_on,reason:v.reason},"Merma reportada");
       },"Enviar a revisión");
     const form=dialog.querySelector("form");
+    const dateField=form.elements.namedItem("occurred_on");
+    dateField.addEventListener("input",()=>{
+      const future=dateField.value>calendarToday&&dateField.value!==activeDay;
+      dateField.setCustomValidity(future?"Selecciona hoy, una fecha anterior o la fecha de la jornada activa.":"");
+    });
     const lotField=form.elements.namedItem("lot");
     const quantityField=form.elements.namedItem("qty");
     const updateLimit=()=>{quantityField.max=lots.find(x=>x.id===Number(lotField.value)).available;};

@@ -182,12 +182,13 @@ def _waste(db, user, p):
     lot_id = _int(p["lot_id"], "lote", 1) if p.get("lot_id") not in (None,"") else None
     reason = _text(p.get("reason"), "motivo de la merma", 500)
     at = stamp()
+    calendar_today = at[:10]
     try:
-        occurred = date.fromisoformat(p.get("occurred_on",at[:10])).isoformat()
+        occurred = date.fromisoformat(p.get("occurred_on",calendar_today)).isoformat()
     except (ValueError,TypeError):
         raise ValueError("Introduce una fecha válida para la merma.") from None
-    if occurred > at[:10]:
-        raise ValueError("La fecha de la merma no puede ser posterior a hoy.")
+    if occurred > calendar_today and occurred != inv.business_day(db):
+        raise ValueError("Selecciona hoy, una fecha anterior o la fecha de la jornada activa.")
     plan=inv._plan(db,source_id,quantity,lot_id)
     cur = db.execute("""INSERT INTO g_wastes(item_id,lot_id,qty_m,reason,created,actor,status,occurred_on) OUTPUT INSERTED.id
                         VALUES(?,?,?,?,?,?,'Pendiente',?)""", (source_id,lot_id,quantity,reason,at,user["name"],occurred))

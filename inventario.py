@@ -227,6 +227,14 @@ def net_sales(db):
                         JOIN inv_orders o ON o.id=l.order_id WHERE o.paid_at IS NOT NULL AND o.status<>'Anulada'""").fetchone()[0]
 
 
+def _next_item_code(db,number):
+    code=public("INS",number)
+    while db.execute("SELECT 1 FROM inv_items WHERE code=?",(code,)).fetchone():
+        number+=1
+        code=public("INS",number)
+    return code
+
+
 def _save_item(db, user, p):
     _role(user, "admin")
     fields = [_text(p.get(k), k, limit) for k, limit in
@@ -234,17 +242,27 @@ def _save_item(db, user, p):
     fields += [_scaled(p.get("min_qty",0),1000,"Stock mínimo",0),
                _scaled(p.get("warn_days",3),1,"Días de aviso",0,3650),
                _bool(p.get("perishable")), _bool(p.get("transformable"))]
-    if p.get("id"):
-        item = _item(db,p["id"])
+    item=_item(db,p["id"]) if p.get("id") else None
+    code=p.get("code")
+    if code:
+        code=_text(code,"código",32)
+        if not item or code!=item["code"]:
+            code=code.upper()
+        if len(code)>32:
+            raise ValueError("El código admite hasta 32 caracteres.")
+        if db.execute("SELECT 1 FROM inv_items WHERE code=? AND id<>?",(code,item["id"] if item else 0)).fetchone():
+            raise ValueError("Ya existe un insumo con ese código.")
+    if item:
         if (fields[3] != item["unit"] or fields[6] != item["perishable"]) and db.execute(
             "SELECT 1 FROM inv_lots WHERE item_id=? UNION SELECT 1 FROM inv_recipes WHERE item_id=? UNION SELECT 1 FROM inv_rules WHERE source_id=? OR target_id=?",
             (item["id"],)*4).fetchone():
             raise ValueError("El insumo tiene lotes o recetas. Conserva su unidad y tipo de vencimiento.")
-        db.execute("UPDATE inv_items SET name=?,category=?,area=?,unit=?,min_qty=?,warn_days=?,perishable=?,transformable=? WHERE id=?",
-                   (*fields,item["id"]))
-        return {"id":item["id"],"code":item["code"]}
+        code=code or item["code"]
+        db.execute("UPDATE inv_items SET code=?,name=?,category=?,area=?,unit=?,min_qty=?,warn_days=?,perishable=?,transformable=? WHERE id=?",
+                   (code,*fields,item["id"]))
+        return {"id":item["id"],"code":code}
     next_id=db.execute("SELECT COALESCE(MAX(id),0)+1 FROM inv_items").fetchone()[0]
-    code=public("INS",next_id)
+    code=code or _next_item_code(db,next_id)
     db.execute("""INSERT INTO inv_items(id,code,name,category,area,unit,min_qty,warn_days,perishable,transformable)
                   VALUES(?,?,?,?,?,?,?,?,?,?)""", (next_id,code,*fields))
     return {"id":next_id,"code":code}
@@ -1014,6 +1032,7 @@ def state(db,user,day):
             "orders":_orders(db,user,balances),"preparation":_preparation(db,user),"rules":rules,"can_prepare":can_prepare,
             "movements":_history(db,user,{},recent=True)}
     if user["role"]=="admin":
+        result["next_item_code"]=_next_item_code(db,1+max((i["id"] for i in all_items),default=0))
         result["menu_categories"]=[r[0] for r in db.execute("SELECT name FROM menu_categories UNION SELECT category FROM inv_products ORDER BY 1")]
     if user["role"]=="area":
         result["area_menu"]=[dict(r) for r in db.execute("SELECT name,category FROM inv_products WHERE prep_area=? ORDER BY category,name",(_area(user),))]
@@ -1197,7 +1216,7 @@ def init(db,demo=True):
     first_day=date.fromisoformat(today())
     ids={}
     for code,name,area,cat,unit,minimum,warn,life,transformable,opening in sample:
-        item=_save_item(db,SYSTEM,{"code":code,"name":name,"area":area,"category":cat,"unit":unit,
+        item=_save_item(db,SYSTEM,{"name":name,"area":area,"category":cat,"unit":unit,
                         "min_qty":minimum,"warn_days":warn,"perishable":life is not None,"transformable":transformable})["id"]
         ids[code]=item
         expiry=(first_day+timedelta(days=life)).isoformat() if life is not None else None

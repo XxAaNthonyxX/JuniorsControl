@@ -6,7 +6,6 @@
   const itemById = id => S.items.find(item => Number(item.id) === Number(id));
   const asOptions = names => names.map(value => [value, value]);
   const itemOptions = list => list.map(i => [i.id, `${i.code} · ${i.name} (${i.unit})`]);
-  const itemLabel = i => `<strong>${h(i.name)}</strong><br><small class="muted">${h(i.code)} · ${h(i.category)}</small>`;
   const option = (value, label, selected) => `<option value="${h(String(value))}" ${String(value) === String(selected) ? 'selected' : ''}>${h(label)}</option>`;
   const metric = (value, label) => `<div class="metric"><div class="value">${h(String(value))}</div><span class="muted">${h(label)}</span></div>`;
   const yesNo = [[0,'No'],[1,'Sí']];
@@ -31,7 +30,9 @@
   function formItem(i = {}) {
     const lists = `<datalist id="inv-areas">${S.areas.map(v=>option(v,v,'')).join('')}</datalist>
       <datalist id="inv-categories">${S.categories.map(v=>option(v,v,'')).join('')}</datalist>`;
-    const fields = input('name','Nombre del insumo','text',i.name || '','required maxlength="100"') +
+    const suggested=i.code||S.next_item_code;
+    const fields = input('code','Código del insumo','text',suggested,'required maxlength="32" autocomplete="off"') +
+      input('name','Nombre del insumo','text',i.name || '','required maxlength="100"') +
       input('unit','Unidad de medida','text',i.unit || '','required maxlength="20" placeholder="kg, L, und…"') +
       input('area','Área responsable','text',i.area || '','required maxlength="60" list="inv-areas"') +
       input('category','Categoría','text',i.category || '','required maxlength="60" list="inv-categories"') +
@@ -40,7 +41,12 @@
       select('perishable','¿Requiere vencimiento?',yesNo,i.perishable ?? 1) +
       select('transformable','¿Se transforma en otro insumo?',yesNo,i.transformable ?? 0) + lists;
     modal(i.id ? `Editar ${i.code}` : 'Nuevo insumo',fields,
-      values => run('inv.item',{...values,...(i.id ? {id:i.id} : {})},'Insumo guardado'));
+      async values=>{
+        if(i.id)values.id=i.id;
+        else if(values.code===suggested)delete values.code;
+        const saved=await run('inv.item',values,'');
+        toast('Insumo guardado · '+saved.code);
+      });
   }
   function formUse(i) {
     const field = input('qty',`Cantidad a consumir (${i.unit})`,'number','','required min="0.001" step="0.001" max="'+Number(i.available)+'"') +
@@ -61,15 +67,15 @@
     const needle = search.trim().toLocaleLowerCase('es');
     const rows = S.items.filter(i=>(!area || i.area===area) && (!category || i.category===category) &&
       (!needle || (i.code+' '+i.name).toLocaleLowerCase('es').includes(needle))).map(i=>[
-        itemLabel(i),h(i.area),`${fmt(i.physical)} ${h(i.unit)}`,fmt(i.reserved),`<strong>${fmt(i.available)}</strong>`,
+        h(i.code),`<strong>${h(i.name)}</strong><br><small class="muted">${h(i.category)}</small>`,h(i.area),`${fmt(i.physical)} ${h(i.unit)}`,fmt(i.reserved),`<strong>${fmt(i.available)}</strong>`,
         badge(i.available===0 ? 'Agotado' : i.available<=i.min_qty ? 'Stock bajo' : 'Disponible'),
-        button('Ver lotes',()=>{ detail=i.id; refreshPanel(); document.getElementById('inventory-detail')?.scrollIntoView({block:'nearest'}); })
+        (isAdmin()?button('Editar',()=>formItem(i),'secondary'):'')+button('Ver lotes',()=>{ detail=i.id; refreshPanel(); document.getElementById('inventory-detail')?.scrollIntoView({block:'nearest'}); })
       ]);
-    return table(['Insumo','Área','Físico','Reservado','Disponible','Estado','Detalle'],rows,'No hay insumos que coincidan con los filtros.');
+    return table(['Código','Insumo','Área','Físico','Reservado','Disponible','Estado','Acciones'],rows,'No hay insumos que coincidan con los filtros.');
   }
   function stockPanel() {
     const filter = `<div class="actions" style="flex-wrap:wrap;margin-bottom:16px">
-      <label class="field">Buscar insumo<input id="inv-search" type="search" placeholder="Código o nombre" value="${h(search)}"></label>
+      <label class="field">Buscar insumo<input id="inv-search" type="search" placeholder="INS0001 o nombre" value="${h(search)}"></label>
       <label class="field">Área<select id="inv-area">${option('','Todas las áreas',area)}${S.areas.map(v=>option(v,v,area)).join('')}</select></label>
       <label class="field">Categoría<select id="inv-category">${option('','Todas las categorías',category)}${S.categories.map(v=>option(v,v,category)).join('')}</select></label>
       </div>`;

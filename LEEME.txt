@@ -1,0 +1,46 @@
+JUNIORS · POLLOS Y PARRILLAS
+Atención, caja e inventario para el restaurante
+
+Esta edición utiliza Microsoft SQL Server. Consulta README.md para configurar la instancia y ejecutar configurar_sqlserver.bat antes del primer inicio. iniciar_web.bat abre la aplicación en el navegador e iniciar_escritorio.bat en una ventana de Windows.
+
+OTRAS COMPUTADORAS Y TABLETAS
+
+En la computadora principal, abre Dispositivos. Allí tienes la dirección HTTPS de tu local, su QR y el certificado público de esta instalación. Sigue CONEXION.txt para confiar en el certificado en cada equipo y abrir el enlace en su navegador. Todos trabajan en la misma base de datos por la red del restaurante. Sólo la computadora principal ejecuta iniciar.bat.
+Para usar la ventana de escritorio en otra PC Windows, extrae allí la edición de escritorio, instala el certificado público del local y abre conectar_al_local.bat. Pega el enlace HTTPS que figura en Dispositivos e inicia sesión. Esta modalidad usa directamente el servidor de la computadora principal.
+
+REGISTRO DEL PERSONAL CON GMAIL
+
+En el primer inicio, pulsa «Enviar código» en la PC principal. Indica tu correo de administrador y la contraseña de aplicación del remitente Gmail. Si el remitente es otra cuenta, escribe también su dirección. Revisa el correo del administrador, introduce los 6 dígitos del código y elige tu contraseña de Juniors.
+Después entra con el correo y la contraseña de Juniors. Pulsa «Recuperar contraseña» para recibir por Gmail un código de 6 dígitos válido durante 15 minutos. El nuevo código reemplaza al anterior. Al guardar la nueva contraseña se cierran las sesiones anteriores. Cada correo tiene una sola cuenta y un solo rol. Desactivar mantiene el correo reservado. Eliminar la cuenta libera el correo para una nueva invitación y conserva el historial.
+
+En Equipo y correo > Configurar Gmail, escribe el correo remitente y una contraseña de aplicación de Google de 16 caracteres. Google requiere verificación en dos pasos y una cuenta que admita contraseñas de aplicación. La guía oficial está enlazada en el formulario.
+En Invitar persona, indica el correo, el rol y el área. El personal abre el enlace de la invitación desde la red del local e introduce el código numérico recibido. En una actualización desde códigos con letras, reenvía las invitaciones pendientes. El código dura 24 horas. Reenviar la invitación reemplaza el código anterior.
+El envío usa smtp.gmail.com por TLS en el puerto 465 y necesita internet. La clave de aplicación queda cifrada con el perfil de Windows en el que se configuró. Si trasladas el sistema a otra cuenta o computadora, vuelve a configurar Gmail. En Equipo puedes desactivar cuentas y modificar el rol o el área.
+
+UN TURNO DE ATENCIÓN
+
+• En Atención, selecciona los platos o bebidas, anota la mesa o la referencia y registra la comanda. El programa aparta los insumos de la receta, comenzando por los lotes utilizables de vencimiento más próximo. El stock físico se mantiene, el disponible disminuye.
+• En Comandas, edita o cancela una reserva. El sistema recalcula o libera las cantidades. Si un lote reservado caduca, la comanda pasa a «Por revisar» para volver a comprobar la disponibilidad.
+• En caja, elige Cobrar y confirma. La reserva pasa a venta y cada insumo se descuenta del físico una sola vez. En las comandas cobradas puedes ver el detalle y devolver unidades. Selecciona sólo los ingredientes que están en condiciones de volver a su lote.
+• Al registrar desde dos dispositivos, el servidor valida la disponibilidad en el momento de guardar. Si otra mesa agotó el último producto, verás el faltante y podrás ajustar tu pedido.
+• En Ventas, caja y administración pueden consultar un intervalo de fechas. El informe muestra cobros, devoluciones, ingreso neto, productos y el código de cada documento. Una venta cobrada ayer y devuelta hoy aparece como cobro en el informe de ayer y devolución en el de hoy. Descargar CSV guarda los movimientos del período.
+• Si el cliente cambia un producto después de pagar, abre la comanda cobrada y elige Ver > Cambiar. Selecciona el reemplazo y los insumos que pueden regresar a su lote. Revisa la diferencia que corresponde cobrar o devolver antes de confirmar. El código CB vincula la devolución y la venta de reemplazo. Si falta stock, la venta original conserva sus cantidades y su importe.
+
+CÓDIGOS
+
+La fecha de negocio corresponde a Lima, UTC−5. Las comandas se numeran C0001, C0002 y así sucesivamente por fecha de creación. A medianoche empieza una nueva serie. La fecha distingue dos comandas C0001 de días distintos. Editar o cancelar una comanda conserva su código. Una comanda abierta al cambiar de día mantiene la fecha con la que fue registrada.
+
+Los demás códigos tienen series continuas. INS identifica insumos, LT lotes, PR productos de carta, V ventas, DV devoluciones y MV movimientos. EQ identifica equivalencias de transformación, US usuarios, RC recepciones, OC órdenes de compra, ME mermas, INC inconformidades, AL alertas e INF informes de faltantes. La parte numérica usa al menos cuatro cifras y continúa con cinco o más cuando corresponde.
+
+INVENTARIO Y COMPRAS
+
+• Para empezar sin datos de ejemplo, registra tus insumos en Inventario. Introduce unidad, área, categoría, cantidad mínima y aviso de vencimiento. En Recepción registra una entrega, revísala y aprueba las cantidades en buen estado. El lote recibe su código al aprobarlo. Para un insumo perecible se requiere su vencimiento.
+• En el catálogo de productos de Inventario, crea el plato, su precio en soles y los insumos con sus cantidades por unidad vendida. La carta calcula automáticamente cuántas porciones se pueden preparar.
+• Para una preparación anticipada, registra la equivalencia y ejecuta la transformación. La receta del plato puede usar el insumo preparado. En Movimientos puedes filtrar las entradas y salidas por fecha y área.
+• En Mermas, informa la cantidad y el motivo. La aprobación administrativa descuenta las existencias. En Recepción, las diferencias generan una inconformidad que administración puede resolver.
+• En Compras, configura el fondo y la hora del informe diario. El sistema compara el saldo con la orden antes de cursarla. En Detalle puedes descargar la hoja de compra en CSV para entregarla al proveedor. El envío al proveedor se realiza por el canal que usa el local.
+• Las alertas y la tarea diaria se revisan mientras el servidor está abierto. Si lo abres después de la hora programada, se genera el informe de ese día. Los importes de compras incluyen gasto recibido y compromiso pendiente, y las ventas se presentan netas de devoluciones.
+
+DATOS Y RECUPERACIÓN
+
+La base se selecciona en sqlserver.json. El servidor realiza una copia nativa .bak diaria mientras está en ejecución. restaurar.bat permite recuperar la copia en una base con otro nombre. Consulta README.md para los permisos y las rutas.

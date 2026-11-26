@@ -1,0 +1,199 @@
+/* Existencias y movimientos comparten los controles de formularios de la aplicación. */
+(() => {
+  let tab = 'stock', detail = null, search = '', area = '', category = '';
+  let moves = null, historyFilter = {}, owner = null;
+  const isAdmin = () => S.user.role === 'admin';
+  const itemById = id => S.items.find(item => Number(item.id) === Number(id));
+  const asOptions = names => names.map(value => [value, value]);
+  const itemOptions = list => list.map(i => [i.id, `${i.code} · ${i.name} (${i.unit})`]);
+  const itemLabel = i => `<strong>${h(i.name)}</strong><br><small class="muted">${h(i.code)} · ${h(i.category)}</small>`;
+  const option = (value, label, selected) => `<option value="${h(String(value))}" ${String(value) === String(selected) ? 'selected' : ''}>${h(label)}</option>`;
+  const metric = (value, label) => `<div class="metric"><div class="value">${h(String(value))}</div><span class="muted">${h(label)}</span></div>`;
+  const yesNo = [[0,'No'],[1,'Sí']];
+
+  function resetForUser() {
+    const access = JSON.stringify([S.user.id, S.user.role, S.user.area]);
+    if (owner === access) return;
+    owner = access;
+    tab = 'stock'; detail = null; moves = null; historyFilter = {};
+    search = ''; area = ''; category = '';
+  }
+  function showTab(next) {
+    tab = next; detail = null; refreshPanel();
+  }
+  function refreshPanel() {
+    const slot = document.getElementById('inventory-module');
+    if (slot) {
+      slot.innerHTML = inventoryPanel();
+      prune();
+    }
+  }
+  function formItem(i = {}) {
+    const lists = `<datalist id="inv-areas">${S.areas.map(v=>option(v,v,'')).join('')}</datalist>
+      <datalist id="inv-categories">${S.categories.map(v=>option(v,v,'')).join('')}</datalist>`;
+    const fields = input('name','Nombre del insumo','text',i.name || '','required maxlength="100"') +
+      input('unit','Unidad de medida','text',i.unit || '','required maxlength="20" placeholder="kg, L, und…"') +
+      input('area','Área responsable','text',i.area || '','required maxlength="60" list="inv-areas"') +
+      input('category','Categoría','text',i.category || '','required maxlength="60" list="inv-categories"') +
+      input('min_qty','Cantidad mínima','number',i.min_qty ?? 0,'required min="0" step="0.001"') +
+      input('warn_days','Avisar días antes de vencer','number',i.warn_days ?? 3,'required min="0" max="3650" step="1"') +
+      select('perishable','¿Requiere vencimiento?',yesNo,i.perishable ?? 1) +
+      select('transformable','¿Se transforma en otro insumo?',yesNo,i.transformable ?? 0) + lists;
+    modal(i.id ? `Editar ${i.code}` : 'Nuevo insumo',fields,
+      values => run('inv.item',{...values,...(i.id ? {id:i.id} : {})},'Insumo guardado'));
+  }
+  function formUse(i) {
+    const field = input('qty',`Cantidad a consumir (${i.unit})`,'number','','required min="0.001" step="0.001" max="'+Number(i.available)+'"') +
+      input('reason','Motivo del consumo','text','','required maxlength="300" placeholder="Actividad del área"');
+    modal(`Consumo de ${i.name}`,field,values => run('inv.use',{...values,item_id:i.id},'Consumo registrado'),'Registrar salida');
+  }
+  function lotsPanel(i) {
+    const lots = S.lots.filter(l => Number(l.item_id) === Number(i.id));
+    const lotRows = lots.map(l => [h(l.code),h(l.expiry || 'Sin vencimiento'),fmt(l.physical),fmt(l.reserved),fmt(l.available)]);
+    const canConsume = isAdmin() || (['area','atencion','recepcion'].includes(S.user.role) &&
+      String(S.user.area || ({recepcion:'Limpieza',atencion:'Atención'}[S.user.role] || '')).toLowerCase() === i.area.toLowerCase());
+    const actions = (canConsume && i.available>0 ? button('Registrar consumo',()=>formUse(i),'primary') : '') +
+      (isAdmin() ? button('Editar insumo',()=>formItem(i)) : '') + button('Cerrar',()=>{ detail=null; refreshPanel(); });
+    return panel(`Lotes de ${i.name} (${i.unit})`,
+      table(['Lote','Vencimiento','Físico','Reservado','Disponible'],lotRows,'Este insumo aún no tiene lotes con existencias.'),actions);
+  }
+  function stockTable() {
+    const needle = search.trim().toLocaleLowerCase('es');
+    const rows = S.items.filter(i=>(!area || i.area===area) && (!category || i.category===category) &&
+      (!needle || (i.code+' '+i.name).toLocaleLowerCase('es').includes(needle))).map(i=>[
+        itemLabel(i),h(i.area),`${fmt(i.physical)} ${h(i.unit)}`,fmt(i.reserved),`<strong>${fmt(i.available)}</strong>`,
+        badge(i.available===0 ? 'Agotado' : i.available<=i.min_qty ? 'Stock bajo' : 'Disponible'),
+        button('Ver lotes',()=>{ detail=i.id; refreshPanel(); document.getElementById('inventory-detail')?.scrollIntoView({block:'nearest'}); })
+      ]);
+    return table(['Insumo','Área','Físico','Reservado','Disponible','Estado','Detalle'],rows,'No hay insumos que coincidan con los filtros.');
+  }
+  function stockPanel() {
+    const filter = `<div class="actions" style="flex-wrap:wrap;margin-bottom:16px">
+      <label class="field">Buscar insumo<input id="inv-search" type="search" placeholder="Código o nombre" value="${h(search)}"></label>
+      <label class="field">Área<select id="inv-area">${option('','Todas las áreas',area)}${S.areas.map(v=>option(v,v,area)).join('')}</select></label>
+      <label class="field">Categoría<select id="inv-category">${option('','Todas las categorías',category)}${S.categories.map(v=>option(v,v,category)).join('')}</select></label>
+      </div>`;
+    const selected = detail != null && itemById(detail);
+    const metrics = `<div class="metrics">${metric(S.items.length,'Insumos en catálogo')}${metric(S.items.filter(i=>i.available<=i.min_qty).length,'En mínimo o agotados')}${metric(S.lots.length,'Lotes con existencias')}</div>`;
+    return metrics + panel('Existencias por insumo',filter+'<div id="inv-results">'+stockTable()+'</div>',isAdmin() ? button('Nuevo insumo',()=>formItem(),'primary') : '') +
+      (selected ? '<div id="inventory-detail">'+lotsPanel(selected)+'</div>' : '');
+  }
+
+  function recipeRow(line={}) {
+    return `<div class="grid2" data-recipe-line style="align-items:end;margin:8px 0;grid-template-columns:minmax(0,2fr) minmax(82px,1fr) auto">
+      <label class="field">Insumo<select data-recipe-item required>${option('','Seleccionar',line.item_id)}${itemOptions(S.items).map(([v,label])=>option(v,label,line.item_id)).join('')}</select></label>
+      <label class="field">Cantidad<input data-recipe-qty type="number" required min="0.001" step="0.001" value="${h(String(line.qty ?? ''))}"></label>
+      <button type="button" class="btn secondary" data-recipe-remove aria-label="Quitar insumo">Quitar</button></div>`;
+  }
+  function formProduct(prod={}) {
+    const fields = input('name','Nombre del producto','text',prod.name || '','required maxlength="100"') +
+      input('category','Sección de la carta','text',prod.category || '','required maxlength="60" placeholder="Brasas"') +
+      input('price','Precio de venta (S/)','number',prod.price ?? '','min="0.01" step="0.01" required') +
+      select('prep_area','Área responsable de preparación',[["Cocina","Cocina"],["Barra","Barra"],["Parrilla","Parrilla"]],prod.prep_area||"Cocina") +
+      `<div class="full"><strong>Insumos por unidad vendida</strong><div id="inv-recipe-rows">${(prod.recipe || [{}]).map(recipeRow).join('')}</div>
+        <button type="button" class="btn secondary" data-recipe-add>Agregar insumo</button></div>`;
+    modal(prod.id ? `Editar ${prod.code}` : 'Nuevo producto de carta',fields, values=>{
+      const recipe=Array.from(document.querySelectorAll('#inv-recipe-rows [data-recipe-line]'),row=>({
+        item_id:row.querySelector('[data-recipe-item]').value,qty:row.querySelector('[data-recipe-qty]').value
+      }));
+      return run('inv.product',{...values,recipe,...(prod.id ? {id:prod.id} : {})},'Producto y receta guardados');
+    });
+  }
+  function productPanel() {
+    const rows=S.products.map(p=>[
+      `<strong>${h(p.name)}</strong><br><small class="muted">${h(p.code)}</small>`,h(p.category),h(p.prep_area||"Cocina"),cash(p.price),
+      (p.recipe || []).map(row=>{const i=itemById(row.item_id); return i ? `${h(i.name)} · ${fmt(row.qty)} ${h(i.unit)}` : '';}).filter(Boolean).join('<br>'),
+      fmt(p.available),button('Editar',()=>formProduct(p))
+    ]);
+    const create=S.items.length ? button('Nuevo producto',()=>formProduct(),'primary') : button('Registrar primer insumo',()=>formItem(),'primary');
+    return panel('Carta y recetas',table(['Producto','Sección','Área de preparación','Precio','Receta por unidad','Porciones posibles','Acción'],rows,'La carta está vacía. Registra insumos para crear una receta.'),create);
+  }
+  function formRule() {
+    const source=itemOptions(S.items.filter(i=>i.transformable));
+    const fields=select('source_id','Materia prima',source) +
+      input('source_qty','Cantidad consumida','number',1,'min="0.001" step="0.001" required') +
+      select('target_id','Insumo preparado',itemOptions(S.items)) +
+      input('target_qty','Cantidad producida','number',1,'min="0.001" step="0.001" required');
+    modal('Equivalencia de preparación',fields,values=>run('inv.rule',values,'Equivalencia guardada'));
+  }
+  function transformPanel() {
+    const rows = S.rules.map(r=>{
+      const raw=itemById(r.source_id),prepared=itemById(r.target_id);
+      return [h(r.code),`${fmt(r.source_qty)} ${h(raw.unit)} · ${h(raw.name)}`,`${fmt(r.target_qty)} ${h(prepared.unit)} · ${h(prepared.name)}`,
+        button('Preparar',()=>{
+          const fields=input('qty','Número de preparaciones','number',1,'min="1" step="1" required') +
+            input('expiry','Vencimiento del preparado','date','','');
+          modal(`Preparar ${prepared.name}`,fields,values=>run('inv.transform',{...values,rule_id:r.id},'Transformación registrada'),'Registrar preparación');
+        })];
+    });
+    return panel('Transformaciones por equivalencia',table(['Código','Materia prima','Resultado','Acción'],rows,'Aún no hay equivalencias para esta área.'),
+      isAdmin() && S.items.some(i=>i.transformable) ? button('Definir equivalencia',formRule,'primary') : '');
+  }
+  function inventoryPanel() {
+    const tabs=[['stock','Existencias']];
+    if (isAdmin()) tabs.push(['products','Carta y recetas']);
+    if (S.can_prepare) tabs.push(['transform','Transformaciones']);
+    const nav=tabs.length>1 ? '<nav class="actions" aria-label="Vistas de inventario">'+tabs.map(([id,label])=>button(label,()=>showTab(id),tab===id ? 'primary' : 'secondary')).join('')+'</nav>' : '';
+    const body=tab==='products' ? productPanel() : tab==='transform' ? transformPanel() : stockPanel();
+    return nav+body;
+  }
+  pages.inventario=()=>{
+    resetForUser();
+    return '<section class="stack" id="inventory-module">'+inventoryPanel()+'</section>';
+  };
+
+  function moveFilters() {
+    const form=input('start','Desde','date',historyFilter.start || '') + input('end','Hasta','date',historyFilter.end || '') +
+      select('area','Área',[['','Todas las áreas'],...asOptions(S.areas)],historyFilter.area || '') +
+      select('item_id','Insumo',[['','Todos los insumos'],...itemOptions(S.items)],historyFilter.item_id || '');
+    modal('Filtrar movimientos',form,async values=>{
+      const r=await api('inv.history',values);
+      historyFilter=values; moves=r.movements; refreshMoves();
+    },'Aplicar filtros');
+  }
+  function refreshMoves() {
+    const slot=document.getElementById('inventory-history');
+    if(slot) {
+      slot.innerHTML=historyPanel();
+      prune();
+    }
+  }
+  function historyPanel() {
+    const list=moves ?? S.movements;
+    const rows=list.map(m=>[
+      `<strong>${h(m.code)}</strong><br><small class="muted">${h(m.at)}</small>`,
+      `${h(m.item)}<br><small class="muted">${h(m.lot_code)} · ${h(m.area)}</small>`,
+      badge(m.qty>0 ? 'Entrada' : 'Salida'),`<strong>${m.qty>0 ? '+' : ''}${fmt(m.qty)} ${h(m.unit)}</strong>`,
+      `${h(m.reason)}<br><small class="muted">${h(m.ref || '')}</small>`,h(m.operator)
+    ]);
+    const criteria=[historyFilter.start && 'Desde '+historyFilter.start,historyFilter.end && 'Hasta '+historyFilter.end,historyFilter.area,
+      historyFilter.item_id && itemById(historyFilter.item_id)?.name].filter(Boolean);
+    const title=moves===null ? 'Últimos movimientos' : 'Movimientos consultados';
+    const content=(criteria.length ? '<p class="muted">'+criteria.map(h).join(' · ')+'</p>' : '')+
+      table(['Movimiento','Insumo / lote','Tipo','Cantidad','Motivo y referencia','Responsable'],rows,'No se encontraron movimientos.');
+    return panel(title,content,(moves!==null ? button('Ver recientes',()=>{historyFilter={}; moves=null; refreshMoves();}) : '')+button('Filtrar historial',moveFilters,'primary'));
+  }
+  pages.movimientos=()=>{
+    resetForUser();
+    return '<section id="inventory-history">'+historyPanel()+'</section>';
+  };
+
+  document.addEventListener('click',e=>{
+    if(e.target.closest('[data-recipe-add]')) document.getElementById('inv-recipe-rows')?.insertAdjacentHTML('beforeend',recipeRow());
+    if(e.target.closest('[data-recipe-remove]')) e.target.closest('[data-recipe-line]')?.remove();
+  });
+  document.addEventListener('input',e=>{
+    if (e.target.id!=='inv-search') return;
+    search=e.target.value;
+    document.getElementById('inv-results').innerHTML=stockTable();
+    prune();
+  });
+  document.addEventListener('change',e=>{
+    if(e.target.id!=='inv-area' && e.target.id!=='inv-category') return;
+    if(e.target.id==='inv-area') area=e.target.value;
+    else category=e.target.value;
+    document.getElementById('inv-results').innerHTML=stockTable();
+    prune();
+  });
+})();
+

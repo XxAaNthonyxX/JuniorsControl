@@ -1,0 +1,17 @@
+.env
+.env.*
+!.env.example
+sqlserver.json
+CONEXION.txt
+.venv/
+__pycache__/
+*.pyc
+runtime/
+*.bak
+*.db
+*.sqlite3
+*.log
+.vscode/
+node_modules/
+dist/
+build/

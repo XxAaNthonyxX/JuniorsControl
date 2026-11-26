@@ -1,0 +1,57 @@
+/* Los controles táctiles se amplían sin cambiar la densidad del escritorio. */
+.ticket-jump, .catalog-jump { display: none; }
+
+@media (pointer: coarse), (max-width: 1080px) {
+  .btn, td .btn, .btn.link, .tabs button, .nav-link,
+  .field input:not([type=checkbox]), .field select, .search input,
+  .filters input[type=date], .check { min-height: 44px; }
+  .add, .stepper button, .iconbtn, dialog header > .close { width: 44px; height: 44px; flex-shrink: 0; }
+  .stepper b { min-width: 26px; text-align: center; }
+  .check input { width: 20px; height: 20px; }
+  .field input, .field select, .field textarea, .search input { font-size: 16px; }
+  .filters .search { margin-left: 0; }
+  .food-info h3 { overflow-wrap: anywhere; }
+  .ticket { max-height: calc(100dvh - 24px); overflow-y: auto; overscroll-behavior: contain; }
+  dialog footer { position: sticky; bottom: 0; background: var(--paper); }
+
+  .table-wrap { overscroll-behavior-x: contain; }
+  #inventory-module, .modal-body, fieldset { min-width: 0; }
+}
+
+@media (max-width: 850px) {
+  .topbar { position: sticky; top: 0; z-index: 3; }
+  .mobile-nav { width: auto; padding: 0 7px; grid-auto-flow: column; gap: 5px; }
+  .mobile-nav::after { content: "Menú"; font-size: 13px; font-weight: 650; }
+  .nav-open .mobile-nav { color: #fff; background: var(--side); }
+  .nav-open .sidebar { height: calc(100dvh - 55px); }
+  .ticket { top: 65px; max-height: calc(100dvh - 75px); }
+}
+@media (max-width: 620px) {
+  .crumb strong, .crumb > span { display: none; }
+  .all-orders { min-height: 44px; min-width: 44px; }
+  .pos { grid-template-columns: minmax(0, 1fr); }
+  .catalog, .ticket { scroll-margin-top: 67px; }
+  .ticket { max-height: none; overflow: visible; }
+  .ticket > header { flex-wrap: wrap; gap: 8px; }
+  .catalog-jump { display: inline-flex; margin-left: auto; }
+  .ticket-jump {
+    position: sticky; bottom: max(8px, env(safe-area-inset-bottom)); z-index: 1;
+    display: flex; width: 100%; justify-content: space-between; margin-top: 12px;
+    padding: 10px 15px; background: var(--side); color: white; border: 0;
+    box-shadow: 0 3px 12px #161e1a36;
+  }
+  .ticket-jump > span { display: inline-flex; align-items: center; gap: 7px; }
+  .food-base { gap: 4px; flex-wrap: wrap; }
+  #order-list table, #order-list tbody { display: block; }
+  #order-list thead {
+    position: absolute; width: 1px; height: 1px; margin: -1px;
+    padding: 0; overflow: hidden; clip-path: inset(50%);
+  }
+  #order-list tr { display: grid; grid-template-columns: 1fr 1fr; gap: 6px 12px; padding: 13px 0; border-bottom: 1px solid var(--line); }
+  #order-list tr:last-child { border-bottom: 0; }
+  #order-list td { padding: 0; border: 0; overflow-wrap: anywhere; }
+  #order-list td:nth-child(2), #order-list td:nth-child(4) { text-align: right; }
+  #order-list td:last-child { grid-column: 1 / -1; }
+  #order-list td .actions { margin-top: 4px; }
+}
+

@@ -26,9 +26,13 @@ function ventasPeriodo(orders,start,end){
    for(const r of o.returns||[]){
      const line=o.lines.find(l=>l.product_id===r.product_id);
      if(!line)continue;
-     credits.set(line.product_id,(credits.get(line.product_id)||0)+r.qty);
-     if(!inRange(r.cash_day||r.at))continue;
      const amount=Math.round(line.price*100)*r.qty;
+     if(r.undone_at&&inRange(r.undone_day)){
+       report.refunded-=amount;addLine(line,-r.qty,-amount,true);
+       report.entries.push({at:r.undone_at,kind:"Reversión de devolución",code:r.code,order:o.code,day:o.day,mesa:o.table_name,who:r.undone_by,amount,id:o.id});
+     }
+     if(!r.undone_at)credits.set(line.product_id,(credits.get(line.product_id)||0)+r.qty);
+     if(!inRange(r.cash_day||r.at))continue;
      report.refunded+=amount;addLine(line,r.qty,amount,true);
      report.entries.push({at:r.at,kind:"Devolución",code:r.code,order:o.code,day:o.day,mesa:o.table_name,who:r.operator,amount:-amount,id:o.id});
    }

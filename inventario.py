@@ -353,7 +353,7 @@ def _may_work(user, area):
 
 
 def _pending_cancel(db, order_id):
-    return db.execute("SELECT id FROM inv_cancel_requests WHERE order_id=? AND status='Pendiente'",(order_id,)).fetchone()
+    return db.execute("SELECT id,revision FROM inv_cancel_requests WHERE order_id=? AND status='Pendiente'",(order_id,)).fetchone()
 
 
 def _dispatch_exists(db, order_id):
@@ -599,6 +599,9 @@ def _refund(db,user,p,*,resolving=0):
                 if r["expiry"] and r["expiry"]<today():
                     raise ValueError("El lote original venció. Desmarca ese insumo para continuar.")
                 _move(db,user,r["lot_id"],take,"Devolución · "+reason,f"{return_code} · {_order_ref(o)}")
+            if resolving:
+                db.execute("INSERT refund_parts(return_id,lot_id,amount,restocked) VALUES(?,?,?,?)",
+                           (return_id,r["lot_id"],take,take if item in restock else 0))
             db.execute("UPDATE inv_alloc SET processed=processed+? WHERE order_id=? AND product_id=? AND lot_id=?",
                        (take,o["id"],pid,r["lot_id"]))
             needed-=take
@@ -721,8 +724,8 @@ def _ask_cancel(db,user,p):
     reason=_text(p.get("reason"),"motivo",500)
     if db.execute("SELECT 1 FROM inv_details WHERE sent_at IS NOT NULL AND order_id=? AND status=N'Entregado'",(o["id"],)).fetchone():
         raise ValueError("Hay productos entregados; consulta con Caja para el ajuste correspondiente.")
-    cid=db.execute("""INSERT INTO inv_cancel_requests(order_id,status,reason,requester,requested_at,requester_id)
-                       OUTPUT INSERTED.id VALUES(?,'Pendiente',?,?,?,?)""",(o["id"],reason,user["name"],now(),user["id"])).lastrowid
+    cid=db.execute("""INSERT INTO inv_cancel_requests(order_id,status,reason,requester,requested_at,requester_id,request_day)
+                       OUTPUT INSERTED.id VALUES(?,'Pendiente',?,?,?,?,?)""",(o["id"],reason,user["name"],now(),user["id"],business_day(db))).lastrowid
     _event(db,user,o["id"],"Cancelación solicitada",reason)
     return {"id":o["id"],"solicitud_id":cid}
 
@@ -733,6 +736,8 @@ def _decide_cancel(db,user,p):
     r=_pending_cancel(db,o["id"])
     if not r or p.get("request_id",r["id"])!=r["id"]:
         raise ValueError("Actualiza la solicitud de cancelación antes de resolverla.")
+    if p.get("revision",r["revision"])!=r["revision"]:
+        raise ValueError("La solicitud cambió. Actualiza antes de resolverla.")
     approved=p.get("approve") is True
     if approved:
         # Una entrega física exige devolución supervisada, no liberar reservas ficticiamente.
@@ -740,9 +745,9 @@ def _decide_cancel(db,user,p):
             raise ValueError("No se puede cancelar: existen productos entregados.")
         _release(db,o["id"])
         db.execute("UPDATE inv_orders SET status='Cancelado',version=version+1 WHERE id=?",(o["id"],))
-    db.execute("UPDATE inv_cancel_requests SET status=?,decided_at=?,decided_by=?,decision_reason=? WHERE id=?",
+    db.execute("UPDATE inv_cancel_requests SET status=?,decided_at=?,decided_by=?,decision_reason=?,prior_status=?,revision=revision+1 WHERE id=?",
                ("Aprobada" if approved else "Rechazada",now(),user["name"],
-                _text(p["reason"],"observación",300) if p.get("reason") else None,r["id"]))
+                _text(p["reason"],"observación",300) if p.get("reason") else None,o["status"],r["id"]))
     _event(db,user,o["id"],"Cancelación aprobada" if approved else "Cancelación rechazada")
     return {"id":o["id"],"aprobada":approved}
 
@@ -867,9 +872,9 @@ def _orders(db,user,balances):
                 "difference":e["difference_cents"]/100}
             replacement["exchange_origin"]={"exchange_code":code,"return_code":public("DV",e["return_id"]),
                 "id":original["id"],"code":original["code"],"day":original["day"],"sale_code":original["sale_code"]}
-        credits=db.execute("""SELECT r.id,r.order_id,r.product_id,r.qty,r.reason,r.at,r.cash_day,r.operator,l.name
+        credits=db.execute("""SELECT r.id,r.order_id,r.product_id,r.qty,r.reason,r.at,r.cash_day,r.operator,l.name,v.at AS undone_at,v.cash_day AS undone_day,v.actor AS undone_by
                               FROM inv_returns r JOIN inv_lines l ON l.order_id=r.order_id AND l.product_id=r.product_id
-                              ORDER BY r.id""")
+                              LEFT JOIN refund_reversals v ON v.return_id=r.id ORDER BY r.id""")
         for credit in credits:
             detail=dict(credit)
             detail.update(linked.get(credit["id"],{}))
@@ -885,7 +890,7 @@ def _orders(db,user,balances):
             d["price"]/=100
             d["pending"]=(d["product_id"],d["qty"])!=(d["sent_product"],d["sent_qty"])
             rows[d["order_id"]]["details"].append(d)
-    pending={r["order_id"]:dict(r) for r in db.execute("SELECT order_id,id,reason,requested_at FROM inv_cancel_requests WHERE status='Pendiente'")}
+    pending={r["order_id"]:dict(r) for r in db.execute("SELECT order_id,id,revision,reason,requested_at FROM inv_cancel_requests WHERE status='Pendiente'")}
     for o in rows.values():
         o["cancel_request"]=pending.get(o["id"])
         o["table_number"]=o.get("table_number")
@@ -985,8 +990,8 @@ def _request_refund(db,user,p):
             FROM inv_lines l WHERE order_id=? AND product_id=?""",(order["id"],pid)).fetchone()
     if not line or qty>line[0]:
         raise ValueError("La cantidad supera las unidades disponibles para solicitar.")
-    db.execute("""INSERT refund_requests(order_id,product_id,qty,reason,requester_id,requester,requested_at,status)
-                  VALUES(?,?,?,?,?,?,?,'Pendiente')""",(order["id"],pid,qty,reason,user["id"],user["name"],now()))
+    db.execute("""INSERT refund_requests(order_id,product_id,qty,reason,requester_id,requester,requested_at,status,request_day)
+                  VALUES(?,?,?,?,?,?,?,'Pendiente',?)""",(order["id"],pid,qty,reason,user["id"],user["name"],now(),business_day(db)))
     return {}
 
 
@@ -996,42 +1001,102 @@ def _resolve_refund(db,user,p):
     if not req:
         raise ValueError("La solicitud ya fue resuelta o no existe.")
     approved=p.get("approve") is True
+    if p.get("revision",req["revision"])!=req["revision"]:
+        raise ValueError("La solicitud cambió. Actualiza antes de resolverla.")
     reason=None if approved else _text(p.get("reason"),"motivo del rechazo",300)
     credit=None
     if approved:
         credit=_refund(db,user,dict(id=req["order_id"],product_id=req["product_id"],qty=req["qty"],
                        reason=req["reason"],restock=p.get("restock",[])),resolving=req["id"])["return_id"]
-    db.execute("UPDATE refund_requests SET status=?,decided_by=?,decided_at=?,decision_reason=?,return_id=? WHERE id=?",
+    db.execute("UPDATE refund_requests SET status=?,decided_by=?,decided_at=?,decision_reason=?,return_id=?,revision=revision+1 WHERE id=?",
                ("Aprobada" if approved else "Rechazada",user["name"],now(),reason,credit,req["id"]))
+    return {}
+
+
+def _undo_request(db,user,p):
+    _role(user,"admin","caja")
+    kind=p.get("kind")
+    if kind not in ("cancel","refund"):
+        raise ValueError("Tipo de solicitud desconocido.")
+    cancellation=kind=="cancel"
+    table="inv_cancel_requests" if cancellation else "refund_requests"
+    req=db.execute("SELECT * FROM "+table+" WHERE id=?",(_id(p.get("id")),)).fetchone()
+    if not req or req["status"] not in ("Aprobada","Rechazada") or req["revision"]!=p.get("revision"):
+        raise ValueError("La decisión cambió. Actualiza la página.")
+    order=_get_order(db,{"id":req["order_id"]})
+    day=business_day(db)
+    request_day=req["request_day"] or order["day"]
+    if day!=request_day:
+        raise ValueError("Abre la jornada de la solicitud antes de deshacer.")
+    oid=order["id"]
+    approved=req["status"]=="Aprobada"
+    if cancellation:
+        if _pending_cancel(db,oid) or order["paid_at"] or db.execute(
+                "SELECT 1 FROM inv_details WHERE order_id=? AND status='Entregado'",(oid,)).fetchone():
+            raise ValueError("La comanda tiene otra solicitud pendiente, un cobro o una entrega posterior.")
+        if approved:
+            if order["status"]!="Cancelado":
+                raise ValueError("La comanda ya cambió de estado.")
+            if db.execute("""SELECT 1 FROM inv_orders WHERE day=? AND id<>? AND status IN ('Reservado','Por revisar')
+                      AND (table_number=? OR table_name=?)""",(order["day"],oid,order["table_number"],order["table_name"])).fetchone():
+                raise ValueError("La mesa está ocupada por otra comanda.")
+            status=req["prior_status"] or "Reservado"
+            if status=="Reservado":
+                lines={r["product_id"]:r for r in db.execute("SELECT * FROM inv_lines WHERE order_id=?",(oid,))}
+                _reserve_lines(db,oid,{k:r["qty"] for k,r in lines.items()},lines,"Por revisar")
+            db.execute("UPDATE inv_orders SET status=? WHERE id=?",(status,oid))
+        elif order["status"] not in ("Reservado","Por revisar"):
+            raise ValueError("La comanda ya está cerrada.")
+    else:
+        pid=req["product_id"]
+        if approved:
+            credit=req["return_id"]
+            ref=public("DV",credit)
+            for part in db.execute("SELECT * FROM refund_parts WHERE return_id=?",(credit,)):
+                if part["restocked"]:
+                    _move(db,user,part["lot_id"],-part["restocked"],"Reversión de devolución",ref)
+                db.execute("UPDATE inv_alloc SET processed=processed-? WHERE order_id=? AND product_id=? AND lot_id=?",
+                           (part["amount"],oid,pid,part["lot_id"]))
+            db.execute("INSERT refund_reversals(return_id,at,cash_day,actor) VALUES(?,?,?,?)",(credit,now(),day,user["name"]))
+            db.execute("UPDATE inv_lines SET refunded=refunded-? WHERE order_id=? AND product_id=?",(req["qty"],oid,pid))
+            db.execute("UPDATE inv_orders SET status='Cobrado' WHERE id=?",(oid,))
+        free=db.execute("""SELECT qty-refunded-COALESCE((SELECT SUM(qty) FROM refund_requests WHERE
+            order_id=? AND product_id=? AND status='Pendiente'),0) FROM inv_lines WHERE order_id=? AND product_id=?""",
+            (oid,pid,oid,pid)).fetchone()[0]
+        if req["qty"]>free:
+            raise ValueError("Las unidades ya se devolvieron o figuran en otra solicitud pendiente.")
+    extra="" if cancellation else ",return_id=NULL"
+    db.execute("UPDATE "+table+" SET status='Pendiente',decided_by=NULL,decided_at=NULL,decision_reason=NULL,revision=revision+1"+extra+" WHERE id=?",(req["id"],))
+    db.execute("UPDATE inv_orders SET version=version+1 WHERE id=?",(oid,))
+    _event(db,user,oid,"Decisión deshecha",f"{kind} #{req['id']} · {req['status']} · {req['decided_by']} · {req['decided_at']} · {req['decision_reason'] or ''}")
     return {}
 
 
 def _service_requests(db,user):
     manager=user["role"] in ("admin","caja")
-    where="" if manager else " WHERE o.user_id=?"
-    args=() if manager else (user["id"],)
-    def records(query,cancellations=False):
-        predicate=where
-        values=args
-        if cancellations and not manager:
-            predicate+=" OR r.requester_id=?"
-            values+=(user["id"],)
+    day=business_day(db)
+    def records(query):
+        predicate=" WHERE COALESCE(r.request_day,o.day)=?"
+        values=(day,)
+        if not manager:
+            predicate+=" AND (o.user_id=? OR r.requester_id=?)"
+            values+=(user["id"],user["id"])
         return [dict(r) for r in db.execute(query+predicate+" ORDER BY r.id DESC",values)]
     orders=" JOIN inv_orders o ON o.id=r.order_id"
     return dict(
-        cancellations=records("SELECT r.*,o.number,o.day,o.table_name FROM inv_cancel_requests r"+orders,True),
+        cancellations=records("SELECT r.*,o.number,o.day,o.table_name FROM inv_cancel_requests r"+orders),
         refunds=records("SELECT r.*,o.number,o.day,o.table_name,l.name FROM refund_requests r"+orders+
                         " JOIN inv_lines l ON l.order_id=r.order_id AND l.product_id=r.product_id"),
         refundable=[dict(r) for r in db.execute("""SELECT o.id,o.number,o.day,o.table_name,l.product_id,l.name,
                     l.qty-l.refunded-COALESCE((SELECT SUM(qty) FROM refund_requests rr WHERE rr.order_id=o.id AND rr.product_id=l.product_id AND rr.status='Pendiente'),0) AS remaining FROM inv_orders o JOIN inv_lines l ON l.order_id=o.id
-                    WHERE o.status='Cobrado' AND l.qty>l.refunded"""+("" if manager else " AND o.user_id=?")+
-                    " ORDER BY o.id DESC,l.product_id",args)])
+                    JOIN inv_sales sale ON sale.order_id=o.id WHERE COALESCE(sale.cash_day,LEFT(o.paid_at,10))=? AND o.status='Cobrado' AND l.qty>l.refunded"""+("" if manager else " AND o.user_id=?")+
+                    " ORDER BY o.id DESC,l.product_id",(day,) if manager else (day,user["id"]))])
 
 
 def act(db,user,action,payload):
     if not isinstance(payload,dict):
         raise ValueError("Los datos de la operación son inválidos.")
-    routes={"inv.menu_category":_menu_category,"pedidos.request_refund":_request_refund,"pedidos.resolve_refund":_resolve_refund,
+    routes={"pedidos.undo_request":_undo_request,"inv.menu_category":_menu_category,"pedidos.request_refund":_request_refund,"pedidos.resolve_refund":_resolve_refund,
             "inv.item":_save_item,"inv.product":_save_product,"inv.rule":_rule,"inv.transform":_transform,
             "pedidos.save":_save_order,"pedidos.cancel":_cancel,"pedidos.pay":_pay,"pedidos.refund":_refund,
             "pedidos.exchange":_exchange,

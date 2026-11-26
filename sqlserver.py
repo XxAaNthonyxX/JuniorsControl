@@ -147,8 +147,11 @@ def preparar(db):
             version = 6
         if version == 6:
             db.execute((ROOT/"sql/jornadas_v7.sql").read_text(encoding="utf8"))
-            return
+            version = 7
         if version == 7:
+            db.execute((ROOT/"sql/deshacer_v8.sql").read_text(encoding="utf8"))
+            return
+        if version == 8:
             return
         if version != 2:
             raise ValueError("Versión de esquema incompatible.")
@@ -164,3 +167,4 @@ def preparar(db):
     db.execute((ROOT/"sql/detalles_v5.sql").read_text(encoding="utf8"))
     db.execute((ROOT/"sql/solicitudes_v6.sql").read_text(encoding="utf8"))
     db.execute((ROOT/"sql/jornadas_v7.sql").read_text(encoding="utf8"))
+    db.execute((ROOT/"sql/deshacer_v8.sql").read_text(encoding="utf8"))

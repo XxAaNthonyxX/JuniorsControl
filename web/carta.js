@@ -120,7 +120,7 @@ function requestCancel(o){
 }
 function decideCancel(o){
  const reason=o.cancel_request?.reason||"";
- modal("Resolver cancelación · "+o.code,`<p><b>Motivo:</b> ${h(reason)}</p>${select("approve","Decisión",[["yes","Aprobar y liberar mesa"],["no","Rechazar y mantener comanda"]])}${input("reason","Observación (opcional)","text","","maxlength=300")}`,async v=>run("pedidos.decide_cancel",{id:o.id,request_id:o.cancel_request.id,reason:v.reason,approve:v.approve==="yes"},"Cancelación resuelta."),"Confirmar decisión");
+ modal("Resolver cancelación · "+o.code,`<p><b>Motivo:</b> ${h(reason)}</p>${select("approve","Decisión",[["yes","Aprobar y liberar mesa"],["no","Rechazar y mantener comanda"]])}${input("reason","Observación (opcional)","text","","maxlength=300")}`,async v=>run("pedidos.decide_cancel",{id:o.id,request_id:o.cancel_request.id,revision:o.cancel_request.revision,reason:v.reason,approve:v.approve==="yes"},"Cancelación resuelta."),"Confirmar decisión");
 }
 function displayOrderStatus(o){
  if(o.cancel_request)return "Cancelación solicitada";
@@ -132,7 +132,7 @@ function displayOrderStatus(o){
 function details(o){
  const mayCharge=["admin","caja"].includes(S.user.role);
  const rows=o.lines.map(l=>[h(l.name),h(l.qty),cash(l.price),h(l.prep_status||"Sin enviar")+(l.prep?.delivered_at?`<small class="sub">${h(l.prep.delivered_at)}</small>`:""),h(l.refunded),cash((l.qty-l.refunded)*l.price),o.status==="Cobrado"&&mayCharge&&l.qty>l.refunded?'<div class="actions">'+button("Devolver",()=>refund(o,l),"link")+button("Cambiar",()=>refund(o,l,true),"secondary")+'</div>':""]);
- const returns=(o.returns||[]).map(r=>[h(r.code),h(r.name),h(r.qty),h(r.reason)+(r.replacement_sale_code?`<small class="sub">Reemplazo · ${h(r.replacement_sale_code)}</small>`:""),h(r.operator)]);
+ const returns=(o.returns||[]).map(r=>[h(r.code),h(r.name),h(r.qty),h(r.reason)+(r.undone_at?`<small class="sub">Revertida · ${h(r.undone_by)}</small>`:"")+(r.replacement_sale_code?`<small class="sub">Reemplazo · ${h(r.replacement_sale_code)}</small>`:""),h(r.operator)]);
  const origin=o.exchange_origin;
  const source=origin?`<p class="notice">Reemplazo ${h(origin.exchange_code)} de la venta ${h(origin.sale_code)} · ${h(origin.code)} del ${h(displayDate(origin.day))} · Devolución ${h(origin.return_code)}.</p>`:"";
  modal(o.code+" · "+o.table_name,`${source}${table(["Detalle","Producto","Cantidad","Estado"],o.details.map(d=>[d.detail_no,h(d.name),d.qty,h(d.pending?"Pendiente de envío":d.status)]))}<div class="summary"><span>${h(displayDate(o.day))} · ${h(o.operator)}</span>${badge(o.status)}</div>${table(["Producto","Uds.","Precio","Preparación / entrega","Dev.","Neto",""],rows)}<div class="total"><strong>Total neto</strong><strong>${cash(o.total)}</strong></div>${o.paid_at?`<p class="muted">Venta ${h(o.sale_code)} · Cobro registrado el ${h(o.paid_at)} por ${h(o.cashier)}.</p>`:""}${returns.length?`<h3>Devoluciones</h3>${table(["Código","Producto","Uds.","Motivo","Responsable"],returns)}`:""}`,null);

@@ -79,9 +79,23 @@ def run():
     action(inv,"pedidos.resolve_refund",dict(id=rejected,approve=False,reason="Revisar cantidad"))
     action(inv,"pedidos.request_refund",dict(request,qty=1),waiter)
     key=snapshot()["service_requests"]["refunds"][0]["id"]
-    action(inv,"pedidos.resolve_refund",dict(id=key,approve=True,restock=[]))
+    lot_balances=lambda: {l["id"]:l["physical"] for l in snapshot()["lots"]}
+    before_refund=lot_balances()
+    ingredient=order()["lines"][0]["ingredients"][0]["item_id"]
+    action(inv,"pedidos.resolve_refund",dict(id=key,approve=True,restock=[ingredient]))
+    assert lot_balances()!=before_refund
     rechazado(ValueError,action,inv,"pedidos.resolve_refund",dict(id=key,approve=True))
     assert order()["total"]==22 and len(order()["returns"])==1
+    undo=dict(id=key,kind="refund",revision=1)
+    rechazado(PermissionError,action,inv,"pedidos.undo_request",undo,waiter)
+    action(inv,"pedidos.undo_request",undo)
+    assert order()["total"]==44 and order()["returns"][0]["undone_at"]
+    assert lot_balances()==before_refund
+    rechazado(ValueError,action,inv,"pedidos.undo_request",undo)
+    action(inv,"pedidos.resolve_refund",dict(id=key,approve=False,revision=2,reason="Prueba"))
+    action(inv,"pedidos.undo_request",dict(undo,revision=3))
+    action(inv,"pedidos.resolve_refund",dict(id=key,approve=True,revision=4,restock=[]))
+    assert order()["total"]==22
     action(inv,"inv.menu_category",dict(name="Jugos"))
     action(inv,"inv.product",dict(name="Jugo QA",category="Jugos",prep_area="Barra",price=8,recipe=[dict(item_id=1,qty=1)]))
     action(inv,"inv.menu_category",dict(previous="Jugos",name="Jugos naturales"))
@@ -99,8 +113,18 @@ def run():
     rechazado(ValueError,lambda: act("send"))
     act("decide_cancel",approve=True)
     assert order()["status"]=="Cancelado"
+    requests=snapshot()["service_requests"]
+    assert not requests["refunds"] and not requests["refundable"]
+    req=requests["cancellations"][0]
+    undo=dict(id=req["id"],kind="cancel",revision=req["revision"])
+    action(inv,"pedidos.undo_request",undo)
+    assert order()["status"]=="Reservado" and order()["cancel_request"]
+    act("decide_cancel",approve=False)
+    action(inv,"pedidos.undo_request",dict(undo,revision=3))
+    act("decide_cancel",approve=True)
     empty="2020-03-01"
     action(gestion,"gestion.cash_day",dict(day=empty,expected_day="2020-02-29"))
+    assert not snapshot()["service_requests"]["cancellations"]
     rechazado(ValueError,action,gestion,"gestion.cash_day",dict(day="2020-03-02",expected_day="2020-02-29"))
     rechazado(PermissionError,action,gestion,"gestion.cash_day",dict(day=empty),waiter)
     action(gestion,"gestion.cash_day",dict(day="2020-02-29",expected_day=empty))

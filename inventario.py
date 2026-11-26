@@ -273,10 +273,18 @@ def _save_item(db, user, p):
         code=code or _next_item_code(db,saved_id)
         db.execute("""INSERT INTO inv_items(id,code,name,category,area,unit,min_qty,warn_days,perishable,transformable)
                       VALUES(?,?,?,?,?,?,?,?,?,?)""", (saved_id,code,*fields))
+    transform_now=_bool(p.get("transform_now",False))
+    if transform_now and not p.get("target_id"):
+        raise ValueError("Selecciona el producto resultante antes de transformar.")
+    result={"id":saved_id,"code":code}
     if p.get("target_id"):
-        _rule(db,user,{"source_id":saved_id,"target_id":p["target_id"],
-                       "source_qty":p.get("source_qty"),"target_qty":p.get("target_qty")})
-    return {"id":saved_id,"code":code}
+        rule=_rule(db,user,{"source_id":saved_id,"target_id":p["target_id"],
+                           "source_qty":p.get("source_qty"),"target_qty":p.get("target_qty")})
+        if transform_now:
+            transformed=_transform(db,user,{"rule_id":rule["id"],"qty":p.get("transform_qty"),
+                                           "expiry":p.get("transform_expiry")})
+            result.update(transformed,transformed=True)
+    return result
 
 
 def _menu_category(db,user,p):

@@ -40,11 +40,23 @@ function detailCard(l){
  ${button(ticket.replaceNumber===l.detail_no?"Selecciona el reemplazo en la carta":"Cambiar producto",()=>{ticket.replaceNumber=l.detail_no;drawPOS();jumpTo(".catalog")},"link")}`;
  return `<div class="ticket-item"><strong>Detalle ${l.detail_no} · ${h(l.name)}</strong><small class="sub">${l.qty} × ${cash(l.price)} · ${h(state)}</small><div class="ticket-item-bottom">${controls}<b>${cash(l.qty*l.price)}</b></div></div>`;
 }
+function productStock(p){
+ const rows=p.recipe.map(line=>{
+   const item=S.items.find(i=>i.id===line.item_id);
+   if(!item)return [h(line.item_id),fmt(line.qty),'Sin información',''];
+   const count=Math.floor(Math.round(item.available*1000)/Math.round(line.qty*1000));
+   return [h(item.name),`${fmt(line.qty)} ${h(item.unit)}`,`${fmt(item.available)} ${h(item.unit)}`,fmt(count)];
+ });
+ modal('Disponibilidad · '+p.name,
+   `<p>Platos disponibles con todos los insumos de la receta: <b>${fmt(p.available)}</b>.</p>`+
+   table(['Insumo','Por plato','Stock libre','Platos posibles'],rows)+
+   '<p>La disponibilidad del plato depende del insumo que permita preparar menos platos. Transformar pollo aumenta su stock; revisa también los demás ingredientes.</p>',null);
+}
 function menuCards(){
  const products=S.products.filter(p=>(menuCategory==="Todos"||menuCategory===p.category)&&norm(p.name+" "+p.code).includes(norm(menuQuery)));
  if(!products.length)return `<div class="empty-state">No se encontraron productos. ${S.products.length?"Prueba otra búsqueda.":S.user.role==="admin"?"Añade la receta desde Inventario.":""}</div>`;
  return `<div class="menu-grid">${products.map(p=>{const left=menuLimit(p)-usedQty(p)+(ticket.lines.find(l=>l.detail_no===ticket.replaceNumber && l.product_id===p.id)?.qty||0);
- return `<article class="food-card"><div class="food-photo">${p.id<=6&&S.demo_assets!==false&&p.name===["Cuarto de pollo a la brasa","Medio pollo a la brasa","Parrilla personal","Chaufa de pollo","Chicha morada","Gaseosa personal"][p.id-1]?`<img src="/carta-${p.id}.jpg" alt="${h(p.name)}">`:`<div class="food-placeholder">${icon("plate")}</div>`}<span class="food-category">${h(p.category)}</span></div><div class="food-info"><span class="product-code">${h(p.code)}</span><h3>${h(p.name)}</h3><div class="food-base"><div><b>${cash(priceFor(p))}</b><small class="${left<=0?"out":""}">${left>0?`${fmt(left)} disponibles`:"Sin disponibilidad"}</small></div><button type="button" class="add" aria-label="Añadir ${h(p.name)}" ${left>0?bind(()=>addDetail(p)):"disabled"}>+</button></div></div></article>`}).join("")}</div>`;
+ return `<article class="food-card"><div class="food-photo">${p.id<=6&&S.demo_assets!==false&&p.name===["Cuarto de pollo a la brasa","Medio pollo a la brasa","Parrilla personal","Chaufa de pollo","Chicha morada","Gaseosa personal"][p.id-1]?`<img src="/carta-${p.id}.jpg" alt="${h(p.name)}">`:`<div class="food-placeholder">${icon("plate")}</div>`}<span class="food-category">${h(p.category)}</span></div><div class="food-info"><span class="product-code">${h(p.code)}</span><h3>${h(p.name)}</h3><div class="food-base"><div><b>${cash(priceFor(p))}</b><small class="${left<=0?"out":""}">${left>0?`${fmt(left)} disponibles`:"Sin disponibilidad"}</small>${S.user.role==="admin"?button("Ver disponibilidad",()=>productStock(p),"link"):""}</div><button type="button" class="add" aria-label="Añadir ${h(p.name)}" ${left>0?bind(()=>addDetail(p)):"disabled"}>+</button></div></div></article>`}).join("")}</div>`;
 }
 function jumpTo(selector){
  const target=document.querySelector(selector);

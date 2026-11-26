@@ -45,15 +45,36 @@
       select('target_id','Producto resultante de la transformación',[['','Seleccionar insumo resultante'],...targets],rule?.target_id || '') +
       input('source_qty','Cantidad de materia prima por preparación','number',rule?.source_qty ?? 1,'min="0.001" step="0.001" required') +
       input('target_qty','Cantidad de producto resultante','number',rule?.target_qty ?? 1,'min="0.001" step="0.001" required') +
-      '<p class="muted">Las cantidades usan la unidad de cada insumo. Para convertir un pollo crudo en uno cocido, indica 1 y 1. Registra la cantidad que prepares desde Transformaciones.</p>' + lists;
-    modal(i.id ? `Editar ${i.code}` : 'Nuevo insumo',fields,
+      '<p class="muted">Equivalencia por preparación. Para convertir 1 pollo crudo en 1 pollo cocido, indica 1 y 1.</p>' +
+      select('transform_now','Acción al guardar',[[0,'Guardar equivalencia'],[1,'Guardar y transformar ahora']],0) +
+      '<div id="inv-transform-now" class="stack" hidden>' +
+      input('transform_qty','Número de preparaciones a ejecutar','number',1,'min="1" max="10000" step="1" required') +
+      input('transform_expiry','Vencimiento del producto resultante','date','','') +
+      '<p id="inv-transform-summary" class="notice" aria-live="polite"></p></div>' + lists;
+    const dialog=modal(i.id ? `Editar ${i.code}` : 'Nuevo insumo',fields,
       async values=>{
         if(i.id)values.id=i.id;
         delete values.code;
         if(values.target_id)values.transformable=1;
         const saved=await run('inv.item',values,'');
-        toast('Insumo guardado · '+saved.code);
+        toast(saved.transformed?'Transformación registrada · materia prima descontada y producto resultante ingresado':'Insumo guardado · '+saved.code);
       });
+    const form=dialog.querySelector('form');
+    const update=()=>{
+      const values=Object.fromEntries(new FormData(form));
+      const execute=values.transform_now==='1';
+      dialog.querySelector('#inv-transform-now').hidden=!execute;
+      dialog.querySelector('#inv-transform-now').style.display=execute?'grid':'none';
+      form.querySelector('button.primary').textContent=execute?'Guardar y transformar':'Guardar';
+      const target=itemById(values.target_id);
+      const count=Number(values.transform_qty);
+      dialog.querySelector('#inv-transform-summary').textContent=target?
+        `Se descontarán ${fmt(Number(values.source_qty)*count)} ${values.unit} de ${values.name} y se ingresarán ${fmt(Number(values.target_qty)*count)} ${target.unit} de ${target.name}.`:
+        'Selecciona el producto resultante para transformar.';
+    };
+    form.addEventListener('input',update);
+    form.addEventListener('change',update);
+    update();
   }
   function formUse(i) {
     const field = input('qty',`Cantidad a consumir (${i.unit})`,'number','','required min="0.001" step="0.001" max="'+Number(i.available)+'"') +

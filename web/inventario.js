@@ -1,6 +1,6 @@
 /* Existencias y movimientos comparten los controles de formularios de la aplicación. */
 (() => {
-  let tab = 'stock', detail = null, search = '', area = '', category = '';
+  let tab = 'stock', detail = null, selectedItem = '', area = '', category = '';
   let moves = null, historyFilter = {}, owner = null;
   const isAdmin = () => S.user.role === 'admin';
   const itemById = id => S.items.find(item => Number(item.id) === Number(id));
@@ -15,7 +15,7 @@
     if (owner === access) return;
     owner = access;
     tab = 'stock'; detail = null; moves = null; historyFilter = {};
-    search = ''; area = ''; category = '';
+    selectedItem = ''; area = ''; category = '';
   }
   function showTab(next) {
     tab = next; detail = null; refreshPanel();
@@ -31,7 +31,7 @@
     const lists = `<datalist id="inv-areas">${S.areas.map(v=>option(v,v,'')).join('')}</datalist>
       <datalist id="inv-categories">${S.categories.map(v=>option(v,v,'')).join('')}</datalist>`;
     const suggested=i.code||S.next_item_code;
-    const fields = input('code','Código del insumo','text',suggested,'required maxlength="32" autocomplete="off"') +
+    const fields = input('code','Código del insumo','text',suggested,'readonly aria-readonly="true"') +
       input('name','Nombre del insumo','text',i.name || '','required maxlength="100"') +
       input('unit','Unidad de medida','text',i.unit || '','required maxlength="20" placeholder="kg, L, und…"') +
       input('area','Área responsable','text',i.area || '','required maxlength="60" list="inv-areas"') +
@@ -43,7 +43,7 @@
     modal(i.id ? `Editar ${i.code}` : 'Nuevo insumo',fields,
       async values=>{
         if(i.id)values.id=i.id;
-        else if(values.code===suggested)delete values.code;
+        delete values.code;
         const saved=await run('inv.item',values,'');
         toast('Insumo guardado · '+saved.code);
       });
@@ -64,9 +64,8 @@
       table(['Lote','Vencimiento','Físico','Reservado','Disponible'],lotRows,'Este insumo aún no tiene lotes con existencias.'),actions);
   }
   function stockTable() {
-    const needle = search.trim().toLocaleLowerCase('es');
     const rows = S.items.filter(i=>(!area || i.area===area) && (!category || i.category===category) &&
-      (!needle || (i.code+' '+i.name).toLocaleLowerCase('es').includes(needle))).map(i=>[
+      (!selectedItem || String(i.id)===selectedItem)).map(i=>[
         h(i.code),`<strong>${h(i.name)}</strong><br><small class="muted">${h(i.category)}</small>`,h(i.area),`${fmt(i.physical)} ${h(i.unit)}`,fmt(i.reserved),`<strong>${fmt(i.available)}</strong>`,
         badge(i.available===0 ? 'Agotado' : i.available<=i.min_qty ? 'Stock bajo' : 'Disponible'),
         (isAdmin()?button('Editar',()=>formItem(i),'secondary'):'')+button('Ver lotes',()=>{ detail=i.id; refreshPanel(); document.getElementById('inventory-detail')?.scrollIntoView({block:'nearest'}); })
@@ -75,7 +74,7 @@
   }
   function stockPanel() {
     const filter = `<div class="actions" style="flex-wrap:wrap;margin-bottom:16px">
-      <label class="field">Buscar insumo<input id="inv-search" type="search" placeholder="INS0001 o nombre" value="${h(search)}"></label>
+      <label class="field">Buscar insumo<select id="inv-search">${option('','Todos los insumos',selectedItem)}${S.items.map(i=>option(i.id,`${i.code} · ${i.name}`,selectedItem)).join('')}</select></label>
       <label class="field">Área<select id="inv-area">${option('','Todas las áreas',area)}${S.areas.map(v=>option(v,v,area)).join('')}</select></label>
       <label class="field">Categoría<select id="inv-category">${option('','Todas las categorías',category)}${S.categories.map(v=>option(v,v,category)).join('')}</select></label>
       </div>`;
@@ -199,15 +198,10 @@
     if(e.target.closest('[data-recipe-add]')) document.getElementById('inv-recipe-rows')?.insertAdjacentHTML('beforeend',recipeRow());
     if(e.target.closest('[data-recipe-remove]')) e.target.closest('[data-recipe-line]')?.remove();
   });
-  document.addEventListener('input',e=>{
-    if (e.target.id!=='inv-search') return;
-    search=e.target.value;
-    document.getElementById('inv-results').innerHTML=stockTable();
-    prune();
-  });
   document.addEventListener('change',e=>{
-    if(e.target.id!=='inv-area' && e.target.id!=='inv-category') return;
-    if(e.target.id==='inv-area') area=e.target.value;
+    if(!['inv-search','inv-area','inv-category'].includes(e.target.id)) return;
+    if(e.target.id==='inv-search') selectedItem=e.target.value;
+    else if(e.target.id==='inv-area') area=e.target.value;
     else category=e.target.value;
     document.getElementById('inv-results').innerHTML=stockTable();
     prune();

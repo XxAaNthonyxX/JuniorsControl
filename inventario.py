@@ -250,10 +250,27 @@ def _save_item(db, user, p):
     return {"id":next_id,"code":code}
 
 
+def _menu_category(db,user,p):
+    _role(user,"admin")
+    name=_text(p.get("name"),"categoría",120)
+    old=p.get("previous")
+    if db.execute("SELECT name FROM menu_categories WHERE name=? UNION SELECT category FROM inv_products WHERE category=?",(name,name)).fetchone():
+        raise ValueError("Ya existe esa categoría.")
+    if old:
+        if not db.execute("SELECT name FROM menu_categories WHERE name=? UNION SELECT category FROM inv_products WHERE category=?",(old,old)).fetchone():
+            raise ValueError("La categoría cambió. Actualiza la carta.")
+        db.execute("UPDATE inv_products SET category=? WHERE category=?",(name,old))
+        db.execute("DELETE FROM menu_categories WHERE name=?",(old,))
+    db.execute("INSERT INTO menu_categories(name) VALUES(?)",(name,))
+    return {}
+
+
 def _save_product(db, user, p):
     _role(user, "admin")
     name = _text(p.get("name"), "nombre")
     cat = _text(p.get("category"), "categoría")
+    if not db.execute("SELECT name FROM menu_categories WHERE name=?",(cat,)).fetchone():
+        db.execute("INSERT INTO menu_categories(name) VALUES(?)",(cat,))
     price = _scaled(p.get("price"), 100, "Precio", high=100_000_000)
     area = _prep_area(p.get("prep_area") or ("Barra" if "bebid" in cat.casefold() else "Parrilla" if "brasa" in cat.casefold() or "parrill" in cat.casefold() else "Cocina"))
     recipe = p.get("recipe")
@@ -542,7 +559,7 @@ def _cancel(db,user,p):
     return {"id":o["id"]}
 
 
-def _refund(db,user,p):
+def _refund(db,user,p,*,resolving=0):
     _role(user,"caja","admin")
     o=_get_order(db,p)
     if o["status"]!="Cobrado":
@@ -554,6 +571,10 @@ def _refund(db,user,p):
     line=db.execute("SELECT * FROM inv_lines WHERE order_id=? AND product_id=?",(o["id"],pid)).fetchone()
     if not line or n>line["qty"]-line["refunded"]:
         raise ValueError("La cantidad excede las unidades cobradas pendientes de devolución.")
+    held=db.execute("""SELECT COALESCE(SUM(qty),0) FROM refund_requests
+                       WHERE order_id=? AND product_id=? AND status='Pendiente' AND id<>?""",(o["id"],pid,resolving)).fetchone()[0]
+    if n>line["qty"]-line["refunded"]-held:
+        raise ValueError("Hay unidades con una solicitud pendiente. Resuélvela desde Solicitudes y devoluciones.")
     restock=p.get("restock",[])
     if not isinstance(restock,list):
         raise ValueError("Revisa la selección de insumos recuperables.")
@@ -700,8 +721,8 @@ def _ask_cancel(db,user,p):
     reason=_text(p.get("reason"),"motivo",500)
     if db.execute("SELECT 1 FROM inv_details WHERE sent_at IS NOT NULL AND order_id=? AND status=N'Entregado'",(o["id"],)).fetchone():
         raise ValueError("Hay productos entregados; consulta con Caja para el ajuste correspondiente.")
-    cid=db.execute("""INSERT INTO inv_cancel_requests(order_id,status,reason,requester,requested_at)
-                       OUTPUT INSERTED.id VALUES(?,'Pendiente',?,?,?)""",(o["id"],reason,user["name"],now())).lastrowid
+    cid=db.execute("""INSERT INTO inv_cancel_requests(order_id,status,reason,requester,requested_at,requester_id)
+                       OUTPUT INSERTED.id VALUES(?,'Pendiente',?,?,?,?)""",(o["id"],reason,user["name"],now(),user["id"])).lastrowid
     _event(db,user,o["id"],"Cancelación solicitada",reason)
     return {"id":o["id"],"solicitud_id":cid}
 
@@ -710,8 +731,8 @@ def _decide_cancel(db,user,p):
     _role(user,"admin","caja")
     o=_get_order(db,p)
     r=_pending_cancel(db,o["id"])
-    if not r:
-        raise ValueError("No hay una solicitud de cancelación pendiente.")
+    if not r or p.get("request_id",r["id"])!=r["id"]:
+        raise ValueError("Actualiza la solicitud de cancelación antes de resolverla.")
     approved=p.get("approve") is True
     if approved:
         # Una entrega física exige devolución supervisada, no liberar reservas ficticiamente.
@@ -719,8 +740,9 @@ def _decide_cancel(db,user,p):
             raise ValueError("No se puede cancelar: existen productos entregados.")
         _release(db,o["id"])
         db.execute("UPDATE inv_orders SET status='Cancelado',version=version+1 WHERE id=?",(o["id"],))
-    db.execute("UPDATE inv_cancel_requests SET status=?,decided_at=?,decided_by=? WHERE id=?",
-               ("Aprobada" if approved else "Rechazada",now(),user["name"],r["id"]))
+    db.execute("UPDATE inv_cancel_requests SET status=?,decided_at=?,decided_by=?,decision_reason=? WHERE id=?",
+               ("Aprobada" if approved else "Rechazada",now(),user["name"],
+                _text(p["reason"],"observación",300) if p.get("reason") else None,r["id"]))
     _event(db,user,o["id"],"Cancelación aprobada" if approved else "Cancelación rechazada")
     return {"id":o["id"],"aprobada":approved}
 
@@ -938,17 +960,79 @@ def state(db,user,day):
             "products":_products(db,balances) if can_order else [],
             "orders":_orders(db,user,balances),"preparation":_preparation(db,user),"rules":rules,"can_prepare":can_prepare,
             "movements":_history(db,user,{},recent=True)}
+    if user["role"]=="admin":
+        result["menu_categories"]=[r[0] for r in db.execute("SELECT name FROM menu_categories UNION SELECT category FROM inv_products ORDER BY 1")]
+    if user["role"]=="area":
+        result["area_menu"]=[dict(r) for r in db.execute("SELECT name,category FROM inv_products WHERE prep_area=? ORDER BY category,name",(_area(user),))]
     if can_order:
+        result["service_requests"]=_service_requests(db,user)
         result["next_order_code"]=public("C",_next_order_number(db,day))
     if user["role"] in ("admin","caja"):
         result["net_sales"]=net_sales(db)/100
     return result
 
 
+def _request_refund(db,user,p):
+    _role(user,"atencion","admin","caja")
+    order=_get_order(db,p)
+    if order["status"]!="Cobrado" or (user["role"]=="atencion" and order["user_id"]!=user["id"]):
+        raise ValueError("Selecciona una venta cobrada que puedas gestionar.")
+    pid=_id(p.get("product_id"))
+    qty=_scaled(p.get("qty"),1,"Unidades",high=10000)
+    reason=_text(p.get("reason"),"motivo",300)
+    line=db.execute("""SELECT qty-refunded-COALESCE((SELECT SUM(r.qty) FROM refund_requests r
+            WHERE r.order_id=l.order_id AND r.product_id=l.product_id AND r.status='Pendiente'),0)
+            FROM inv_lines l WHERE order_id=? AND product_id=?""",(order["id"],pid)).fetchone()
+    if not line or qty>line[0]:
+        raise ValueError("La cantidad supera las unidades disponibles para solicitar.")
+    db.execute("""INSERT refund_requests(order_id,product_id,qty,reason,requester_id,requester,requested_at,status)
+                  VALUES(?,?,?,?,?,?,?,'Pendiente')""",(order["id"],pid,qty,reason,user["id"],user["name"],now()))
+    return {}
+
+
+def _resolve_refund(db,user,p):
+    _role(user,"admin","caja")
+    req=db.execute("SELECT * FROM refund_requests WHERE id=? AND status='Pendiente'",(_id(p.get("id")),)).fetchone()
+    if not req:
+        raise ValueError("La solicitud ya fue resuelta o no existe.")
+    approved=p.get("approve") is True
+    reason=None if approved else _text(p.get("reason"),"motivo del rechazo",300)
+    credit=None
+    if approved:
+        credit=_refund(db,user,dict(id=req["order_id"],product_id=req["product_id"],qty=req["qty"],
+                       reason=req["reason"],restock=p.get("restock",[])),resolving=req["id"])["return_id"]
+    db.execute("UPDATE refund_requests SET status=?,decided_by=?,decided_at=?,decision_reason=?,return_id=? WHERE id=?",
+               ("Aprobada" if approved else "Rechazada",user["name"],now(),reason,credit,req["id"]))
+    return {}
+
+
+def _service_requests(db,user):
+    manager=user["role"] in ("admin","caja")
+    where="" if manager else " WHERE o.user_id=?"
+    args=() if manager else (user["id"],)
+    def records(query,cancellations=False):
+        predicate=where
+        values=args
+        if cancellations and not manager:
+            predicate+=" OR r.requester_id=?"
+            values+=(user["id"],)
+        return [dict(r) for r in db.execute(query+predicate+" ORDER BY r.id DESC",values)]
+    orders=" JOIN inv_orders o ON o.id=r.order_id"
+    return dict(
+        cancellations=records("SELECT r.*,o.number,o.day,o.table_name FROM inv_cancel_requests r"+orders,True),
+        refunds=records("SELECT r.*,o.number,o.day,o.table_name,l.name FROM refund_requests r"+orders+
+                        " JOIN inv_lines l ON l.order_id=r.order_id AND l.product_id=r.product_id"),
+        refundable=[dict(r) for r in db.execute("""SELECT o.id,o.number,o.day,o.table_name,l.product_id,l.name,
+                    l.qty-l.refunded-COALESCE((SELECT SUM(qty) FROM refund_requests rr WHERE rr.order_id=o.id AND rr.product_id=l.product_id AND rr.status='Pendiente'),0) AS remaining FROM inv_orders o JOIN inv_lines l ON l.order_id=o.id
+                    WHERE o.status='Cobrado' AND l.qty>l.refunded"""+("" if manager else " AND o.user_id=?")+
+                    " ORDER BY o.id DESC,l.product_id",args)])
+
+
 def act(db,user,action,payload):
     if not isinstance(payload,dict):
         raise ValueError("Los datos de la operación son inválidos.")
-    routes={"inv.item":_save_item,"inv.product":_save_product,"inv.rule":_rule,"inv.transform":_transform,
+    routes={"inv.menu_category":_menu_category,"pedidos.request_refund":_request_refund,"pedidos.resolve_refund":_resolve_refund,
+            "inv.item":_save_item,"inv.product":_save_product,"inv.rule":_rule,"inv.transform":_transform,
             "pedidos.save":_save_order,"pedidos.cancel":_cancel,"pedidos.pay":_pay,"pedidos.refund":_refund,
             "pedidos.exchange":_exchange,
             "pedidos.send":_send_to_areas,"pedidos.prep":_advance_preparation,

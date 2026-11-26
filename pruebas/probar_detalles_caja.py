@@ -7,10 +7,10 @@ import gestion
 
 def run():
     admin={"id":1,"name":"Admin QA","role":"admin","area":""}
-    def action(module,name,payload):
+    def action(module,name,payload,user=admin):
         with closing(sqlserver.connect()) as db, db:
             db.lock(True)
-            return module.act(db,admin,name,payload)
+            return module.act(db,user,name,payload)
 
     def snapshot():
         with closing(sqlserver.connect()) as db, db:
@@ -69,12 +69,36 @@ def run():
     action(gestion,"gestion.void_expense",dict(id=expenses[0]["id"],day=inv.today(),reason="Prueba"))
     with closing(sqlserver.connect()) as db, db:
         assert gestion.state(db,admin)["cash_expenses"][0]["void_at"]
+    waiter=dict(admin,role="atencion")
+    bar=dict(admin,role="area",area="Barra")
+    request=dict(id=order()["id"],product_id=1,qty=2,reason="Pedido devuelto")
+    action(inv,"pedidos.request_refund",request,waiter)
+    rechazado(ValueError,action,inv,"pedidos.request_refund",request,waiter)
+    rejected=snapshot()["service_requests"]["refunds"][0]["id"]
+    rechazado(PermissionError,action,inv,"pedidos.resolve_refund",dict(id=rejected,approve=True),waiter)
+    action(inv,"pedidos.resolve_refund",dict(id=rejected,approve=False,reason="Revisar cantidad"))
+    action(inv,"pedidos.request_refund",dict(request,qty=1),waiter)
+    key=snapshot()["service_requests"]["refunds"][0]["id"]
+    action(inv,"pedidos.resolve_refund",dict(id=key,approve=True,restock=[]))
+    rechazado(ValueError,action,inv,"pedidos.resolve_refund",dict(id=key,approve=True))
+    assert order()["total"]==22 and len(order()["returns"])==1
+    action(inv,"inv.menu_category",dict(name="Jugos"))
+    action(inv,"inv.product",dict(name="Jugo QA",category="Jugos",prep_area="Barra",price=8,recipe=[dict(item_id=1,qty=1)]))
+    action(inv,"inv.menu_category",dict(previous="Jugos",name="Jugos naturales"))
+    for area in ("Barra","Cocina","Parrilla"):
+        with closing(sqlserver.connect()) as db, db:
+            scoped=inv.state(db,dict(bar,area=area),inv.today())
+        assert not scoped["orders"] and "service_requests" not in scoped
+        assert any(p["name"]=="Jugo QA" and p["category"]=="Jugos naturales" for p in scoped["area_menu"])==(area=="Barra")
+        assert all(job["area"]==area for job in scoped["preparation"])
     action(gestion,"gestion.cash_day",{"day":"2020-02-29"})
     action(inv,"pedidos.save",dict(table_number=11,lines=details(6)))
     assert order()["day"]=="2020-02-29" and order()["code"]=="C0001"
     act("request_cancel",reason="Prueba de bloqueo")
     rechazado(ValueError,lambda: act("save",lines=details(6,6)))
     rechazado(ValueError,lambda: act("send"))
+    act("decide_cancel",approve=True)
+    assert order()["status"]=="Cancelado"
     print("Detalles, envío, entrega, cobro único con Yape y arqueo verificados.")
 
 

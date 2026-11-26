@@ -6,6 +6,8 @@ const nav = [
   ["atencion","Atención","grid","OPERACIÓN",["admin","caja","atencion"],"Sala y pedidos","Selecciona los productos para armar una comanda."],
   ["preparacion","Preparación y entregas","plate","",["admin","area"],"Pedidos en preparación","Consulta solamente los pedidos de tu área y marca su avance."],
   ["comandas","Comandas","receipt","",["admin","caja","atencion"],"Comandas","Consulta las reservas, cobra pedidos y revisa las ventas."],
+  ["solicitudes","Solicitudes y devoluciones","receipt","",["admin","caja","atencion"],"Solicitudes y devoluciones","Consulta el estado de las anulaciones y devoluciones."],
+  ["carta","Carta y categorías","plate","",["admin","area"],"Carta y categorías","Productos por categoría y área de preparación."],
   ["ventas","Ventas","flow","",["admin","caja"],"Reporte de ventas","Consulta los cobros y las devoluciones según la fecha en que se registraron."],
   ["inventario","Inventario","box","INVENTARIO",Object.keys(roleNames),"Inventario","Consulta existencias, lotes y recetas por área."],
   ["movimientos","Movimientos","flow","",Object.keys(roleNames),"Movimientos","Sigue las entradas y salidas de insumos por fecha."],
@@ -253,7 +255,7 @@ async function refreshSession(){
    const notice=observeAlerts(fresh,false);
    if(notice)toast(notice);
    const editing=document.querySelector("#dialog").open||["INPUT","SELECT","TEXTAREA"].includes(document.activeElement.tagName);
-   if(!editing&&["atencion","comandas","preparacion","alertas"].includes(route)){S=fresh;render()}
+   if(!editing&&["atencion","comandas","preparacion","solicitudes","alertas"].includes(route)){S=fresh;render()}
  }catch{}finally{checkingSession=false}
 }
 setInterval(refreshSession,30000);

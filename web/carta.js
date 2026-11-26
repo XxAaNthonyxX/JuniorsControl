@@ -120,7 +120,7 @@ function requestCancel(o){
 }
 function decideCancel(o){
  const reason=o.cancel_request?.reason||"";
- modal("Resolver cancelación · "+o.code,`<p><b>Motivo:</b> ${h(reason)}</p>${select("approve","Decisión",[["yes","Aprobar y liberar mesa"],["no","Rechazar y mantener comanda"]])}`,async v=>run("pedidos.decide_cancel",{id:o.id,approve:v.approve==="yes"},"Cancelación resuelta."),"Confirmar decisión");
+ modal("Resolver cancelación · "+o.code,`<p><b>Motivo:</b> ${h(reason)}</p>${select("approve","Decisión",[["yes","Aprobar y liberar mesa"],["no","Rechazar y mantener comanda"]])}${input("reason","Observación (opcional)","text","","maxlength=300")}`,async v=>run("pedidos.decide_cancel",{id:o.id,request_id:o.cancel_request.id,reason:v.reason,approve:v.approve==="yes"},"Cancelación resuelta."),"Confirmar decisión");
 }
 function displayOrderStatus(o){
  if(o.cancel_request)return "Cancelación solicitada";

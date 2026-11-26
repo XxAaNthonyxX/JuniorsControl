@@ -87,7 +87,8 @@
   }
   function formProduct(prod={}) {
     const fields = input('name','Nombre del producto','text',prod.name || '','required maxlength="100"') +
-      input('category','Sección de la carta','text',prod.category || '','required maxlength="60" placeholder="Brasas"') +
+      input('category','Categoría','text',prod.category || '','required list="categorias-carta" maxlength="120"') +
+      `<datalist id="categorias-carta">${(S.menu_categories||[]).map(c=>`<option value="${h(c)}"></option>`).join('')}</datalist>` +
       input('price','Precio de venta (S/)','number',prod.price ?? '','min="0.01" step="0.01" required') +
       select('prep_area','Área responsable de preparación',[["Cocina","Cocina"],["Barra","Barra"],["Parrilla","Parrilla"]],prod.prep_area||"Cocina") +
       `<div class="full"><strong>Insumos por unidad vendida</strong><div id="inv-recipe-rows">${(prod.recipe || [{}]).map(recipeRow).join('')}</div>
@@ -108,6 +109,16 @@
     const create=S.items.length ? button('Nuevo producto',()=>formProduct(),'primary') : button('Registrar primer insumo',()=>formItem(),'primary');
     return panel('Carta y recetas',table(['Producto','Sección','Área de preparación','Precio','Receta por unidad','Porciones posibles','Acción'],rows,'La carta está vacía. Registra insumos para crear una receta.'),create);
   }
+  function categoryForm(previous){
+    modal(previous?"Renombrar categoría":"Nueva categoría",input("name","Nombre","text",previous||"","required maxlength=120"),
+      v=>run("inv.menu_category",{name:v.name,previous},"Categoría guardada"));
+  }
+  pages.carta=()=>{
+    if(S.user.role==="area")return panel("Productos de "+S.user.area,table(["Producto","Categoría"],
+      (S.area_menu||[]).map(p=>[h(p.name),h(p.category)]),"Todavía no hay productos asignados a esta área."));
+    return productPanel()+panel("Categorías",table(["Categoría","Acción"],S.menu_categories.map(c=>[h(c),button("Renombrar",()=>categoryForm(c),"link")])),
+      button("Nueva categoría",()=>categoryForm(""),"primary"));
+  };
   function formRule() {
     const source=itemOptions(S.items.filter(i=>i.transformable));
     const fields=select('source_id','Materia prima',source) +

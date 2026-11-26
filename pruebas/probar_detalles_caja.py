@@ -99,6 +99,18 @@ def run():
     rechazado(ValueError,lambda: act("send"))
     act("decide_cancel",approve=True)
     assert order()["status"]=="Cancelado"
+    empty="2020-03-01"
+    action(gestion,"gestion.cash_day",dict(day=empty,expected_day="2020-02-29"))
+    rechazado(ValueError,action,gestion,"gestion.cash_day",dict(day="2020-03-02",expected_day="2020-02-29"))
+    rechazado(PermissionError,action,gestion,"gestion.cash_day",dict(day=empty),waiter)
+    action(gestion,"gestion.cash_day",dict(day="2020-02-29",expected_day=empty))
+    with closing(sqlserver.connect()) as db, db:
+        registry={r["day"]:r for r in gestion.state(db,admin)["registered_days"]}
+        assert empty in registry and registry[empty]["opened_by"]==admin["name"]
+        assert inv.today() in registry and inv.business_day(db)=="2020-02-29"
+        assert "registered_days" not in gestion.state(db,waiter)
+        assert db.execute("SELECT COUNT(*) FROM cash_days WHERE day=?",("2020-02-29",)).fetchone()[0]==1
+    print("Registro persistente, reapertura, permisos y conflicto entre jornadas verificados.")
     print("Detalles, envío, entrega, cobro único con Yape y arqueo verificados.")
 
 

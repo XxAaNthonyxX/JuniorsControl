@@ -8,6 +8,7 @@ const nav = [
   ["comandas","Comandas","receipt","",["admin","caja","atencion"],"Comandas","Consulta las reservas, cobra pedidos y revisa las ventas."],
   ["solicitudes","Solicitudes y devoluciones","receipt","",["admin","caja","atencion"],"Solicitudes y devoluciones","Consulta el estado de las anulaciones y devoluciones."],
   ["carta","Carta y categorías","plate","",["admin","area"],"Carta y categorías","Productos por categoría y área de preparación."],
+  ["jornadas","Jornadas","calendar","",["admin","caja"],"Registro de jornadas","Consulta una fecha o ábrela para trabajar con ella en todo el local."],
   ["ventas","Ventas","flow","",["admin","caja"],"Reporte de ventas","Consulta los cobros y las devoluciones según la fecha en que se registraron."],
   ["inventario","Inventario","box","INVENTARIO",Object.keys(roleNames),"Inventario","Consulta existencias, lotes y recetas por área."],
   ["movimientos","Movimientos","flow","",Object.keys(roleNames),"Movimientos","Sigue las entradas y salidas de insumos por fecha."],
@@ -143,8 +144,8 @@ function render(){
  const side=nav.map(([k,label,ic,section])=>{
    if(section)group=section;if(!allowed.some(x=>x[0]===k))return "";
    const heading=activeGroup===group?"":`<div class="nav-label">${group}</div>`;activeGroup=group;
-   const count=k==="preparacion"?(S.preparation||[]).filter(x=>x.status!=="Entregado").length:
-     k==="comandas"?(S.orders||[]).filter(o=>o.status==="Reservado"||o.status==="Por revisar").length:
+   const count=k==="preparacion"?(S.preparation||[]).filter(x=>x.day===S.today&&x.status!=="Entregado").length:
+     k==="comandas"?(S.orders||[]).filter(o=>o.day===S.today&&["Reservado","Por revisar"].includes(o.status)).length:
      k==="alertas"?(S.alerts||[]).filter(a=>!a.closed).length:0;
    const notice=k==="alertas"&&count?` aria-description="${count} alertas activas"`:"";
    return `${heading}<a href="#${k}" class="nav-link ${route===k?"selected":""}" ${route===k?'aria-current="page"':""}${notice}>${icon(ic)}${h(label)}${count?`<em${k==="alertas"?' aria-hidden="true"':""}>${count}</em>`:""}</a>`;
@@ -255,7 +256,7 @@ async function refreshSession(){
    const notice=observeAlerts(fresh,false);
    if(notice)toast(notice);
    const editing=document.querySelector("#dialog").open||["INPUT","SELECT","TEXTAREA"].includes(document.activeElement.tagName);
-   if(!editing&&["atencion","comandas","preparacion","solicitudes","alertas"].includes(route)){S=fresh;render()}
+   if(!editing&&(fresh.today!==S.today||["jornadas","ventas","atencion","comandas","preparacion","solicitudes","alertas"].includes(route))){S=fresh;render()}
  }catch{}finally{checkingSession=false}
 }
 setInterval(refreshSession,30000);

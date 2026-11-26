@@ -412,8 +412,16 @@ def act(db, user, action, payload):
     elif action=="gestion.cash_day":
         inv._role(user,"admin","caja")
         day=date.fromisoformat(payload["day"]).isoformat() if payload.get("day") else None
+        previous=inv.business_day(db)
+        if payload.get("expected_day",previous)!=previous:
+            raise ValueError("La jornada cambió en otro equipo. Actualiza antes de abrir otra fecha.")
+        active=day or inv.today()
+        if previous!=active:
+            db.execute("IF NOT EXISTS(SELECT 1 FROM cash_days WHERE day=?) INSERT cash_days(day) VALUES(?)",(previous,previous))
+        db.execute("""IF NOT EXISTS(SELECT 1 FROM cash_days WHERE day=?)
+                      INSERT cash_days(day,opened_at,opened_by) VALUES(?,?,?)""",(active,active,inv.now(),user["name"]))
         db.execute("UPDATE g_settings SET work_day=? WHERE id=1",(day,))
-        return {"day":day or inv.today()}
+        return {"day":active}
     elif action in {"gestion.cash_expense","gestion.void_expense"}:
         inv._role(user,"admin","caja")
         day=inv.business_day(db)
@@ -460,6 +468,12 @@ def state(db, user):
     result = {"receipts":[], "wastes":[], "incidents":[], "alerts":[], "purchases":[],
               "reports":[], "budget":None, "schedule":None}
     if user["role"] in ("admin","caja"):
+        result["registered_days"]=[dict(r) for r in db.execute("""WITH days(day) AS (
+            SELECT day FROM cash_days UNION SELECT day FROM inv_orders UNION SELECT day FROM cash_expenses
+            UNION SELECT COALESCE(s.cash_day,LEFT(o.paid_at,10)) FROM inv_sales s JOIN inv_orders o ON o.id=s.order_id
+            UNION SELECT COALESCE(cash_day,LEFT(at,10)) FROM inv_returns UNION SELECT CAST(? AS nvarchar(10)))
+            SELECT days.day,d.opened_at,d.opened_by FROM days LEFT JOIN cash_days d ON days.day=d.day
+            WHERE days.day IS NOT NULL ORDER BY days.day DESC""",(inv.business_day(db),))]
         result["cash_expenses"]=[dict(r) for r in db.execute("SELECT * FROM cash_expenses ORDER BY day DESC,id DESC")]
     if receiving:
         for r in db.execute("""SELECT r.id,r.item_id,i.name item_name,i.unit,r.supplier,r.qty_m,

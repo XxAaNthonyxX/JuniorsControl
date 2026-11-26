@@ -42,16 +42,35 @@ function ventasPeriodo(orders,start,end){
  return report;
 }
 (() => {
- let owner=null,from="",to="";
+ let owner=null,from="",to="",activeDay="";
  const money=cents=>cash(cents/100);
  function downloadReport(report){
    const rows=[["Fecha y hora","Operación","Código","Comanda","Jornada de comanda","Mesa o referencia","Responsable","Importe (S/)"]];
    for(const e of report.entries)rows.push([e.at,e.kind,e.code,e.order,e.day,e.mesa,e.who,e.amount/100]);
    exportCsv(`Ventas_${from}_${to}.csv`,rows);
  }
+ function viewDay(day){
+   owner=S.user.id;activeDay=S.today;from=day;to=day;go("ventas");
+ }
+ function openDay(day){
+   const expected=S.today;
+   modal("Abrir jornada",input("day","Fecha de trabajo","date",day||S.today,"required")+
+     "<p>La fecha seleccionada se aplicará a Atención, preparación y Caja.</p>",
+     v=>run("gestion.cash_day",{day:v.day,expected_day:expected},"Jornada abierta"),"Abrir jornada");
+ }
+ pages.jornadas=()=>{
+   const counts=new Map();
+   for(const order of S.orders)counts.set(order.day,(counts.get(order.day)||0)+1);
+   const rows=S.registered_days.map(d=>[
+     h(d.day),d.day===S.today?badge("Activa"):"",
+     counts.get(d.day)||0,h(d.opened_by||"—"),h(d.opened_at||"—"),
+     button("Ver comandas",()=>viewOrdersDay(d.day),"link")+button("Ver arqueo",()=>viewDay(d.day),"link")+(d.day===S.today?"":button("Abrir jornada",()=>openDay(d.day),"secondary"))]);
+   return panel("Jornada activa · "+displayDate(S.today),table(["Fecha","Estado","Comandas","Registrada por","Fecha de registro","Acciones"],rows),
+     button("Abrir fecha",()=>openDay(),"primary"));
+ };
  function paint(){
    if(!["admin","caja"].includes(S.user.role))return "";
-   if(owner!==S.user.id){owner=S.user.id;from=S.today;to=S.today}
+   if(owner!==S.user.id||activeDay!==S.today){owner=S.user.id;activeDay=S.today;from=S.today;to=S.today}
    const r=ventasPeriodo(S.orders,from,to);
    const metric=(label,value)=>`<div class="metric"><span>${h(label)}</span><b class="value">${h(value)}</b></div>`;
    const records=r.entries.map(e=>[
@@ -71,8 +90,9 @@ function ventasPeriodo(orders,start,end){
      e.void_at?h("Anulado · "+e.void_reason+" · "+e.void_by):e.day!==S.today?"Registrado":button("Anular",()=>modal("Anular gasto",input("reason","Motivo","text","","required"),
        v=>run("gestion.void_expense",{id:e.id,day:e.day,reason:v.reason},"Gasto anulado")),"link")]);
    const methods=["Efectivo","Yape","Tarjeta","Sin especificar","Cambio"].map(m=>[m,r.entries.filter(e=>e.kind==="Cobro"&&e.method===m).reduce((n,e)=>n+e.amount,0)]).filter(([,amount])=>amount);
+   const expectedDay=S.today;
    const jornada=button("Cambiar jornada",()=>modal("Jornada de caja",input("day","Fecha de trabajo (vacía para usar la fecha actual)","date",S.today),
-     async v=>{await run("gestion.cash_day",v,"Jornada actualizada");from=S.today;to=S.today;render()}),"secondary");
+     async v=>{await run("gestion.cash_day",{...v,expected_day:expectedDay},"Jornada actualizada");from=S.today;to=S.today;render()}),"secondary");
    return panel("Período de caja",filters,jornada)+`<div class="metrics">${metric("Ventas cobradas",r.count)}${metric("Cobros",money(r.gross))}${metric("Devoluciones",money(r.refunded))}${metric("Ingreso neto",money(r.net))}</div>`+
       (r.unlocated?`<p class="notice">El historial anterior contiene ${money(r.unlocated)} en devoluciones sin fecha registrada. El informe incluye los movimientos con fecha verificable.</p>`:"")+
       panel("Arqueo de caja",`<div class="metrics">${metric("Ventas netas",money(r.net))}${metric("Personal",money(spent("Personal")))}${metric("Mercado",money(spent("Mercado")))}${metric(result<0?"Pérdida":result>0?"Ganancia":"Resultado",money(result))}</div>`+table(["Medio de pago","Cobros"],methods.map(([m,v])=>[h(m),money(v)]),"Sin cobros"))+

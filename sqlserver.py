@@ -159,8 +159,11 @@ def preparar(db):
             version = 10
         if version == 10:
             db.execute((ROOT/"sql/porciones_v11.sql").read_text(encoding="utf8"))
-            return
+            version = 11
         if version == 11:
+            db.execute((ROOT/"sql/categorias_atencion_v12.sql").read_text(encoding="utf8"))
+            return
+        if version == 12:
             return
         if version != 2:
             raise ValueError("Versión de esquema incompatible.")
@@ -180,3 +183,4 @@ def preparar(db):
     db.execute((ROOT/"sql/anular_venta_v9.sql").read_text(encoding="utf8"))
     db.execute((ROOT/"sql/para_llevar_v10.sql").read_text(encoding="utf8"))
     db.execute((ROOT/"sql/porciones_v11.sql").read_text(encoding="utf8"))
+    db.execute((ROOT/"sql/categorias_atencion_v12.sql").read_text(encoding="utf8"))

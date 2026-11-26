@@ -331,7 +331,14 @@ def _save_product(db, user, p):
     if not db.execute("SELECT name FROM menu_categories WHERE name=?",(cat,)).fetchone():
         db.execute("INSERT INTO menu_categories(name) VALUES(?)",(cat,))
     price = _scaled(p.get("price"), 100, "Precio", high=100_000_000)
-    area = _prep_area(p.get("prep_area") or ("Barra" if "bebid" in cat.casefold() else "Parrilla" if "brasa" in cat.casefold() or "parrill" in cat.casefold() else "Cocina"))
+    category_key = cat.casefold()
+    if category_key == "barra" or "bebid" in category_key:
+        default_area = "Barra"
+    elif "brasa" in category_key or "parrill" in category_key:
+        default_area = "Parrilla"
+    else:
+        default_area = "Cocina"
+    area = _prep_area(p.get("prep_area") or default_area)
     recipe = p.get("recipe")
     if not isinstance(recipe,list) or not 1<=len(recipe)<=100:
         raise ValueError("Agrega entre uno y cien insumos a la receta.")
@@ -1081,10 +1088,10 @@ def state(db,user,day):
     if user["role"]=="admin":
         result["portion_groups"]=[dict(r) for r in db.execute("SELECT * FROM inv_portion_groups")]
         result["next_item_code"]=_next_item_code(db,1+max((i["id"] for i in all_items),default=0))
-        result["menu_categories"]=[r[0] for r in db.execute("SELECT name FROM menu_categories UNION SELECT category FROM inv_products ORDER BY 1")]
     if user["role"]=="area":
         result["area_menu"]=[dict(r) for r in db.execute("SELECT name,category FROM inv_products WHERE prep_area=? ORDER BY category,name",(_area(user),))]
     if can_order:
+        result["menu_categories"]=[r[0] for r in db.execute("SELECT name FROM menu_categories UNION SELECT category FROM inv_products ORDER BY 1")]
         result["service_requests"]=_service_requests(db,user)
         result["next_order_code"]=public("C",_next_order_number(db,day))
     if user["role"] in ("admin","caja"):
@@ -1273,9 +1280,9 @@ def init(db,demo=True):
         ("Cuarto de pollo a la brasa","Brasas",22,[("POL-02",1),("PAP-01",0.5),("ENS-01",1)]),
         ("Medio pollo a la brasa","Brasas",41,[("POL-02",2),("PAP-01",1.5),("ENS-01",2)]),
         ("Parrilla personal","Parrillas",34,[("RES-01",0.28),("PAP-01",0.2),("ENS-01",1)]),
-        ("Chaufa de pollo","Oriental",19,[("ARR-01",0.25),("POL-03",0.12)]),
-        ("Chicha morada","Bebidas",7,[("BEB-01",0.4)]),
-        ("Gaseosa personal","Bebidas",5,[("BEB-02",1)]),
+        ("Chaufa de pollo","Orientales",19,[("ARR-01",0.25),("POL-03",0.12)]),
+        ("Chicha morada","Barra",7,[("BEB-01",0.4)]),
+        ("Gaseosa personal","Barra",5,[("BEB-02",1)]),
         ("Pollo entero a la brasa","Brasas",68,[("POL-02",4),("PAP-01",3),("ENS-01",4)]),
     ]
     products={}

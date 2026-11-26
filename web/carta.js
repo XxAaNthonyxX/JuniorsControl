@@ -2,6 +2,7 @@
 "use strict";
 let ticket={lines:[],table_name:"",table_number:null,floor:1,take_away:false,id:null,version:null,code:"",day:""},menuCategory="Todos",menuQuery="";
 let orderFilter="Abiertas",orderDay=null,orderQuery="";
+const menuCategoryOrder=["Brasas","Parrillas","Barra","Orientales"];
 function resetTicket(){ticket={lines:[],table_name:"",table_number:null,floor:1,take_away:false,id:null,version:null,code:"",day:""};menuCategory="Todos";menuQuery="";orderFilter="Abiertas";orderDay=null;orderQuery=""}
 function norm(v){return String(v||"").toLowerCase().normalize("NFD").replace(/[\u0300-\u036f]/g,"")}
 function orderCode(o){return `${h(o.code)} <small class="sub">${h(displayDate(o.day))}</small>`}
@@ -82,7 +83,11 @@ function ticketPanel(){
  <div class="ticket-items">${ticket.lines.length?ticket.lines.map(detailCard).join(""):`<div class="ticket-empty"><span>${icon("plate")}</span><b>Comanda vacía</b><p>Agrega un producto de la carta para comenzar.</p></div>`}</div><div class="ticket-bottom"><div class="line"><span>Productos</span><b>${n}</b></div><div class="total"><strong>Total</strong><strong>${cash(sumTicket())}</strong></div><button class="btn primary big" ${n&&ticket.lines.every(l=>l.product_id)?bind(saveTicket):"disabled"}>${icon("receipt")}${ticket.id?"Guardar cambios":"Registrar comanda"}</button>${ticket.id||n?button(ticket.id?"Salir de la edición":"Vaciar comanda",()=>modal("Descartar borrador","<p>Se descartarán los cambios de esta comanda que aún no guardaste.</p>",async()=>{resetTicket();render()},"Descartar"),"link clear-ticket"):""}</div></section>`;
 }
 function posBody(){
- const cats=["Todos",...new Set(S.products.map(p=>p.category))];if(!cats.includes(menuCategory))menuCategory="Todos";
+ const categories=new Set(S.menu_categories??S.products.map(product=>product.category));
+ categories.delete("Todos");
+ const preferred=menuCategoryOrder.filter(category=>categories.delete(category));
+ const cats=["Todos",...preferred,...categories];
+ if(!cats.includes(menuCategory))menuCategory="Todos";
  return `<div class="pos"><section class="catalog" tabindex="-1" aria-label="Carta del local"><div class="catalog-head"><div><h2>Carta del local</h2><span class="catalog-count">${S.products.length} productos</span></div><label class="search">${icon("search")}<input id="menu-search" aria-label="Buscar en la carta" placeholder="Buscar producto" value="${h(menuQuery)}"></label></div><div class="tabs menu-tabs">${cats.map(c=>`<button class="${c===menuCategory?"active":""}" ${bind(()=>{menuCategory=c;drawPOS()})}>${h(c)}</button>`).join("")}</div><div id="cards">${menuCards()}</div>${jumpToTicket()}</section>${ticketPanel()}</div>`;
 }
 function attentionPage(){

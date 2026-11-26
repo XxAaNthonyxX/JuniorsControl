@@ -260,12 +260,16 @@ def _save_item(db, user, p):
         code=code or item["code"]
         db.execute("UPDATE inv_items SET code=?,name=?,category=?,area=?,unit=?,min_qty=?,warn_days=?,perishable=?,transformable=? WHERE id=?",
                    (code,*fields,item["id"]))
-        return {"id":item["id"],"code":code}
-    next_id=db.execute("SELECT COALESCE(MAX(id),0)+1 FROM inv_items").fetchone()[0]
-    code=code or _next_item_code(db,next_id)
-    db.execute("""INSERT INTO inv_items(id,code,name,category,area,unit,min_qty,warn_days,perishable,transformable)
-                  VALUES(?,?,?,?,?,?,?,?,?,?)""", (next_id,code,*fields))
-    return {"id":next_id,"code":code}
+        saved_id=item["id"]
+    else:
+        saved_id=db.execute("SELECT COALESCE(MAX(id),0)+1 FROM inv_items").fetchone()[0]
+        code=code or _next_item_code(db,saved_id)
+        db.execute("""INSERT INTO inv_items(id,code,name,category,area,unit,min_qty,warn_days,perishable,transformable)
+                      VALUES(?,?,?,?,?,?,?,?,?,?)""", (saved_id,code,*fields))
+    if p.get("target_id"):
+        _rule(db,user,{"source_id":saved_id,"target_id":p["target_id"],
+                       "source_qty":p.get("source_qty"),"target_qty":p.get("target_qty")})
+    return {"id":saved_id,"code":code}
 
 
 def _menu_category(db,user,p):

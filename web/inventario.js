@@ -31,6 +31,8 @@
     const lists = `<datalist id="inv-areas">${S.areas.map(v=>option(v,v,'')).join('')}</datalist>
       <datalist id="inv-categories">${S.categories.map(v=>option(v,v,'')).join('')}</datalist>`;
     const suggested=i.code||S.next_item_code;
+    const rule=S.rules.find(r=>Number(r.source_id)===Number(i.id));
+    const targets=itemOptions(S.items.filter(item=>Number(item.id)!==Number(i.id)));
     const fields = `<div class="field"><span id="item-code-label">Código del insumo</span><output aria-labelledby="item-code-label" class="notice">${h(suggested)}</output></div>` +
       input('name','Nombre del insumo','text',i.name || '','required maxlength="100"') +
       input('unit','Unidad de medida','text',i.unit || '','required maxlength="20" placeholder="kg, L, und…"') +
@@ -39,11 +41,16 @@
       input('min_qty','Cantidad mínima','number',i.min_qty ?? 0,'required min="0" step="0.001"') +
       input('warn_days','Avisar días antes de vencer','number',i.warn_days ?? 3,'required min="0" max="3650" step="1"') +
       select('perishable','¿Requiere vencimiento?',yesNo,i.perishable ?? 1) +
-      select('transformable','¿Se transforma en otro insumo?',yesNo,i.transformable ?? 0) + lists;
+      select('transformable','¿Se transforma en otro insumo?',yesNo,i.transformable ?? 0) +
+      select('target_id','Producto resultante de la transformación',[['','Seleccionar insumo resultante'],...targets],rule?.target_id || '') +
+      input('source_qty','Cantidad de materia prima por preparación','number',rule?.source_qty ?? 1,'min="0.001" step="0.001" required') +
+      input('target_qty','Cantidad de producto resultante','number',rule?.target_qty ?? 1,'min="0.001" step="0.001" required') +
+      '<p class="muted">Las cantidades usan la unidad de cada insumo. Para convertir un pollo crudo en uno cocido, indica 1 y 1. Registra la cantidad que prepares desde Transformaciones.</p>' + lists;
     modal(i.id ? `Editar ${i.code}` : 'Nuevo insumo',fields,
       async values=>{
         if(i.id)values.id=i.id;
         delete values.code;
+        if(values.target_id)values.transformable=1;
         const saved=await run('inv.item',values,'');
         toast('Insumo guardado · '+saved.code);
       });

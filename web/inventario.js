@@ -61,19 +61,20 @@
     modal(`Consumo de ${i.name}`,field,values => run('inv.use',{...values,item_id:i.id},'Consumo registrado'),'Registrar salida');
   }
   function lotsPanel(i) {
-    const lots = S.lots.filter(l => Number(l.item_id) === Number(i.id));
+    const source=itemById(i.base_id)||i;
+    const lots = S.lots.filter(l => Number(l.item_id) === Number(source.id));
     const lotRows = lots.map(l => [h(l.code),h(l.expiry || 'Sin vencimiento'),fmt(l.physical),fmt(l.reserved),fmt(l.available)]);
     const canConsume = isAdmin() || (['area','atencion','recepcion'].includes(S.user.role) &&
       String(S.user.area || ({recepcion:'Limpieza',atencion:'Atención'}[S.user.role] || '')).toLowerCase() === i.area.toLowerCase());
     const actions = (canConsume && i.available>0 ? button('Registrar consumo',()=>formUse(i),'primary') : '') +
       (isAdmin() ? button('Editar insumo',()=>formItem(i)) : '') + button('Cerrar',()=>{ detail=null; refreshPanel(); });
-    return panel(`Lotes de ${i.name} (${i.unit})`,
+    return panel(`Lotes de ${source.name} (${source.unit})`,
       table(['Lote','Vencimiento','Físico','Reservado','Disponible'],lotRows,'Este insumo aún no tiene lotes con existencias.'),actions);
   }
   function stockTable() {
     const rows = S.items.filter(i=>(!area || i.area===area) && (!category || i.category===category) &&
       (!selectedItem || String(i.id)===selectedItem)).map(i=>[
-        h(i.code),`<strong>${h(i.name)}</strong><br><small class="muted">${h(i.category)}</small>`,h(i.area),`${fmt(i.physical)} ${h(i.unit)}`,fmt(i.reserved),`<strong>${fmt(i.available)}</strong>`,
+        h(i.code),`<strong>${h(i.name)}</strong><br><small class="muted">${h(i.category)}${i.base_id?` · ${i.factor} cuartos por unidad<br>Stock compartido con ${h(i.base_code)} · ${fmt(i.remaining_portions)} cuartos restantes<br>Físico incluye unidades empezadas. Disponible cuenta unidades completas`:""}</small>`,h(i.area),`${fmt(i.physical)} ${h(i.unit)}`,fmt(i.reserved),`<strong>${fmt(i.available)}</strong>`,
         badge(i.available===0 ? 'Agotado' : i.available<=i.min_qty ? 'Stock bajo' : 'Disponible'),
         (isAdmin()?button('Editar',()=>formItem(i),'secondary'):'')+button('Ver lotes',()=>{ detail=i.id; refreshPanel(); document.getElementById('inventory-detail')?.scrollIntoView({block:'nearest'}); })
       ]);
@@ -98,12 +99,19 @@
       <button type="button" class="btn secondary" data-recipe-remove aria-label="Quitar insumo">Quitar</button></div>`;
   }
   function formProduct(prod={}) {
+    const presets=(S.portion_groups||[]).map(group=>[ [1,0.5,'¼ pollo'],[2,1.5,'½ pollo'],[4,3,'1 pollo'] ].map(([portions,potato,label])=>button(label,()=>{
+      const rows=document.querySelector('#inv-recipe-rows');
+      const existing=Array.from(rows.querySelectorAll('[data-recipe-line]'),row=>({item_id:Number(row.querySelector('[data-recipe-item]').value),qty:row.querySelector('[data-recipe-qty]').value}));
+      const recipe=existing.filter(r=>r.item_id&&r.item_id!==group.base_id&&r.item_id!==group.potato_id);
+      recipe.push({item_id:group.base_id,qty:portions},{item_id:group.potato_id,qty:potato});
+      rows.innerHTML=recipe.map(recipeRow).join('');
+    })).join('')).join('');
     const fields = input('name','Nombre del producto','text',prod.name || '','required maxlength="100"') +
       input('category','Categoría','text',prod.category || '','required list="categorias-carta" maxlength="120"') +
       `<datalist id="categorias-carta">${(S.menu_categories||[]).map(c=>`<option value="${h(c)}"></option>`).join('')}</datalist>` +
       input('price','Precio de venta (S/)','number',prod.price ?? '','min="0.01" step="0.01" required') +
       select('prep_area','Área responsable de preparación',[["Cocina","Cocina"],["Barra","Barra"],["Parrilla","Parrilla"]],prod.prep_area||"Cocina") +
-      `<div class="full"><strong>Insumos por unidad vendida</strong><div id="inv-recipe-rows">${(prod.recipe || [{}]).map(recipeRow).join('')}</div>
+      `<div class="full"><strong>Insumos por unidad vendida</strong><div class="actions">${presets}</div><div id="inv-recipe-rows">${(prod.recipe || [{}]).map(recipeRow).join('')}</div>
         <button type="button" class="btn secondary" data-recipe-add>Agregar insumo</button></div>`;
     modal(prod.id ? `Editar ${prod.code}` : 'Nuevo producto de carta',fields, values=>{
       const recipe=Array.from(document.querySelectorAll('#inv-recipe-rows [data-recipe-line]'),row=>({
@@ -131,6 +139,19 @@
     return productPanel()+panel("Categorías",table(["Categoría","Acción"],S.menu_categories.map(c=>[h(c),button("Renombrar",()=>categoryForm(c),"link")])),
       button("Nueva categoría",()=>categoryForm(""),"primary"));
   };
+  function formPortions() {
+    const items=itemOptions(S.items.filter(i=>!i.base_id));
+    const products=[['','Sin asignar'],...S.products.map(p=>[p.id,`${p.code} · ${p.name}`])];
+    const group=S.portion_groups?.[0]||{};
+    const fields=select('raw_id','Pollo crudo',items,group.raw_id)+
+      select('base_id','Stock de cuartos de pollo cocido',items,group.base_id)+
+      select('potato_id','Papa (kg)',items,group.potato_id)+
+      select('quarter_product_id','Producto de carta de ¼ pollo',products)+
+      select('half_product_id','Producto de carta de ½ pollo',products)+
+      select('whole_product_id','Producto de carta de 1 pollo',products)+
+      '<p>Dos cuartos equivalen a un medio y cuatro a un entero. Se muestran como stock compartido. La transformación convierte 1 pollo crudo en 1 entero cocido (4 cuartos). Papa por plato: 0,5 kg, 1,5 kg y 3 kg. Las recetas se aplican a nuevas comandas.</p>';
+    modal('Equivalencias de pollo',fields,values=>run('inv.portions',values,'Equivalencias y recetas guardadas'));
+  }
   function formRule() {
     const source=itemOptions(S.items.filter(i=>i.transformable));
     const fields=select('source_id','Materia prima',source) +
@@ -150,7 +171,7 @@
         })];
     });
     return panel('Transformaciones por equivalencia',table(['Código','Materia prima','Resultado','Acción'],rows,'Aún no hay equivalencias para esta área.'),
-      isAdmin() && S.items.some(i=>i.transformable) ? button('Definir equivalencia',formRule,'primary') : '');
+      (isAdmin() && S.items.some(i=>i.transformable) ? button('Definir equivalencia',formRule,'primary') : '')+(isAdmin()?button('Equivalencias de pollo',formPortions):''));
   }
   function inventoryPanel() {
     const tabs=[['stock','Existencias']];

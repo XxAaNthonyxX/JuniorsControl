@@ -166,6 +166,8 @@ def _waste(db, user, p):
     item = _item(db, p.get("item_id"))
     if not _waste_accessible(user, item["area"]):
         raise PermissionError("El insumo pertenece a otra área.")
+    source_id,quantity=inv.porciones.resolve(db,item["id"],inv.qty(p.get("qty")))
+    item=_item(db,source_id)
     lot_id = p.get("lot_id")
     if lot_id not in (None,""):
         lot_id = _int(lot_id, "lote", 1)
@@ -173,7 +175,6 @@ def _waste(db, user, p):
     else:
         lot_id = None
         physical = _one(db,"SELECT coalesce(sum(physical),0) FROM inv_lots WHERE item_id=?",item["id"])[0]
-    quantity = inv.qty(p.get("qty"))
     if quantity > physical:
         raise ValueError("La cantidad reportada supera las existencias físicas.")
     reason = _text(p.get("reason"), "motivo de la merma", 500)

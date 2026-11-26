@@ -7,6 +7,7 @@ from collections import defaultdict
 from datetime import date, datetime, timedelta, timezone
 from decimal import Decimal, InvalidOperation
 import pyodbc
+import porciones
 
 
 LIMA = timezone(timedelta(hours=-5))
@@ -127,6 +128,7 @@ def _move(db, user, lot, delta, reason, ref):
 
 
 def receive(db, user, item_id, qty_milli, expiry, reason, ref):
+    item_id,qty_milli=porciones.resolve(db,item_id,qty_milli)
     item = _item(db, item_id)
     if not isinstance(qty_milli, int) or qty_milli <= 0:
         raise ValueError("La entrada debe ser mayor que cero.")
@@ -161,6 +163,7 @@ def _plan(db, item_id, amount, lot_id=None):
 
 
 def withdraw(db, user, item_id, qty_milli, reason, ref, lot_id=None):
+    item_id,qty_milli=porciones.resolve(db,item_id,qty_milli)
     plan = _plan(db, item_id, qty_milli, lot_id)
     for lot, amount, _ in plan:
         _move(db, user, lot, -amount, reason, ref)
@@ -208,6 +211,7 @@ def stock(db):
         for k in ("min_qty", "physical", "reserved", "available"):
             item[k] = num(item[k])
         result.append(item)
+    porciones.project(db,result)
     return result
 
 
@@ -243,6 +247,9 @@ def _save_item(db, user, p):
                _scaled(p.get("warn_days",3),1,"Días de aviso",0,3650),
                _bool(p.get("perishable")), _bool(p.get("transformable"))]
     item=_item(db,p["id"]) if p.get("id") else None
+    if item and db.execute("SELECT 1 FROM inv_stock_equivalents WHERE item_id=? OR base_id=?",(item["id"],item["id"])).fetchone():
+        if (fields[2],fields[3],fields[6])!=(item["area"],item["unit"],item["perishable"]):
+            raise ValueError("El stock compartido debe conservar su área, unidad y tipo de vencimiento.")
     code=p.get("code")
     if code:
         code=_text(code,"código",32)
@@ -310,10 +317,11 @@ def _save_product(db, user, p):
         if not isinstance(row,dict):
             raise ValueError("Revisa los insumos de la receta.")
         item = _item(db,row.get("item_id"))["id"]
+        item,amount=porciones.resolve(db,item,qty(row.get("qty")))
         if item in added:
             raise ValueError("Agrupa las cantidades del mismo insumo en una línea de receta.")
         added.add(item)
-        db.execute("INSERT INTO inv_recipes VALUES(?,?,?)",(prod,item,qty(row.get("qty"))))
+        db.execute("INSERT INTO inv_recipes VALUES(?,?,?)",(prod,item,amount))
     return {"id":prod,"code":public("PR",prod)}
 
 
@@ -865,7 +873,8 @@ def _history(db,user,p,recent=False):
         conditions.append("c.area=?")
         args.append(area)
     if p.get("item_id"):
-        item=_item(db,p["item_id"])
+        source_id,_=porciones.resolve(db,_id(p["item_id"]),0)
+        item=_item(db,source_id)
         if user["role"] not in ("caja","admin","recepcion") and item["area"].casefold()!=area.casefold():
             previous=db.execute("""SELECT 1 FROM inv_move_context c JOIN inv_moves m ON m.id=c.move_id
                                    JOIN inv_lots l ON l.id=m.lot_id WHERE c.area=? AND l.item_id=?""",
@@ -1040,6 +1049,7 @@ def state(db,user,day):
             "orders":_orders(db,user,balances),"preparation":_preparation(db,user),"rules":rules,"can_prepare":can_prepare,
             "movements":_history(db,user,{},recent=True)}
     if user["role"]=="admin":
+        result["portion_groups"]=[dict(r) for r in db.execute("SELECT * FROM inv_portion_groups")]
         result["next_item_code"]=_next_item_code(db,1+max((i["id"] for i in all_items),default=0))
         result["menu_categories"]=[r[0] for r in db.execute("SELECT name FROM menu_categories UNION SELECT category FROM inv_products ORDER BY 1")]
     if user["role"]=="area":
@@ -1173,7 +1183,7 @@ def _service_requests(db,user):
 def act(db,user,action,payload):
     if not isinstance(payload,dict):
         raise ValueError("Los datos de la operación son inválidos.")
-    routes={"pedidos.void_sale":_void_sale,"pedidos.undo_request":_undo_request,"inv.menu_category":_menu_category,"pedidos.request_refund":_request_refund,"pedidos.resolve_refund":_resolve_refund,
+    routes={"inv.portions":porciones.setup,"pedidos.void_sale":_void_sale,"pedidos.undo_request":_undo_request,"inv.menu_category":_menu_category,"pedidos.request_refund":_request_refund,"pedidos.resolve_refund":_resolve_refund,
             "inv.item":_save_item,"inv.product":_save_product,"inv.rule":_rule,"inv.transform":_transform,
             "pedidos.save":_save_order,"pedidos.cancel":_cancel,"pedidos.pay":_pay,"pedidos.refund":_refund,
             "pedidos.exchange":_exchange,
@@ -1230,15 +1240,19 @@ def init(db,demo=True):
         expiry=(first_day+timedelta(days=life)).isoformat() if life is not None else None
         receive(db,SYSTEM,item,qty(opening),expiry,"Apertura de demostración","Inventario inicial")
     dishes=[
-        ("Cuarto de pollo a la brasa","Brasas",22,[("POL-02",1),("PAP-01",0.22),("ENS-01",1)]),
-        ("Medio pollo a la brasa","Brasas",41,[("POL-02",2),("PAP-01",0.44),("ENS-01",2)]),
+        ("Cuarto de pollo a la brasa","Brasas",22,[("POL-02",1),("PAP-01",0.5),("ENS-01",1)]),
+        ("Medio pollo a la brasa","Brasas",41,[("POL-02",2),("PAP-01",1.5),("ENS-01",2)]),
         ("Parrilla personal","Parrillas",34,[("RES-01",0.28),("PAP-01",0.2),("ENS-01",1)]),
         ("Chaufa de pollo","Oriental",19,[("ARR-01",0.25),("POL-03",0.12)]),
         ("Chicha morada","Bebidas",7,[("BEB-01",0.4)]),
         ("Gaseosa personal","Bebidas",5,[("BEB-02",1)]),
+        ("Pollo entero a la brasa","Brasas",68,[("POL-02",4),("PAP-01",3),("ENS-01",4)]),
     ]
+    products={}
     for name,cat,price,recipe in dishes:
-        _save_product(db,SYSTEM,{"name":name,"category":cat,"price":price,
-                      "recipe":[{"item_id":ids[code],"qty":amount} for code,amount in recipe]})
-    _rule(db,SYSTEM,{"source_id":ids["POL-01"],"source_qty":1,"target_id":ids["POL-02"],"target_qty":4})
+        products[name]=_save_product(db,SYSTEM,{"name":name,"category":cat,"price":price,
+                      "recipe":[{"item_id":ids[code],"qty":amount} for code,amount in recipe]})["id"]
+    porciones.setup(db,SYSTEM,dict(raw_id=ids["POL-01"],base_id=ids["POL-02"],potato_id=ids["PAP-01"],
+        quarter_product_id=products["Cuarto de pollo a la brasa"],half_product_id=products["Medio pollo a la brasa"],
+        whole_product_id=products["Pollo entero a la brasa"]))
     db.execute("INSERT INTO inv_seed VALUES(1)")

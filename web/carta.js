@@ -164,7 +164,12 @@ function filteredOrders(){
 }
 function orderTable(){
  return table(["Comanda","Piso / Mesa","Estado","Creada","Total","Acciones"],filteredOrders().map(o=>{
- const acts=button("Ver detalle de comanda",()=>details(o),"secondary");
+ let acts=button("Ver detalle de comanda",()=>details(o),"secondary");
+ if(["admin","caja","atencion"].includes(S.user.role)&&["Reservado","Por revisar"].includes(o.status)){
+   if(o.cancel_request)acts+='<small class="muted">Envío bloqueado por solicitud de cancelación.</small>';
+   else if(o.status==="Por revisar")acts+='<small class="muted">Revisa y guarda la comanda desde Atención antes de enviarla.</small>';
+   else if(o.details.some(d=>d.pending))acts+=button("Enviar al área de preparación",()=>sendToPreparation(o),"primary");
+ }
  return [`<b class="mono">${orderCode(o)}</b>`,`<strong>${h(o.table_name)}</strong><small class="sub">${o.floor?`Piso ${o.floor}`:"Anterior a la actualización"}</small>`,badge(displayOrderStatus(o))+(o.cancel_request?`<small class="sub">${h(o.cancel_request.reason)}</small>`:""),h(o.created),cash(o.total),`<div class="actions">${acts}</div>`]}),"No hay comandas que coincidan con estos filtros.");
 }
 pages.comandas=()=>{

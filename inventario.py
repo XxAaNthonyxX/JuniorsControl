@@ -489,17 +489,21 @@ def _save_order(db,user,p,*,exchange=False):
             raise ValueError("Actualiza la comanda antes de editarla.")
         if details and not all("detail_no" in line for line in rows):
             raise ValueError("Actualiza la aplicación antes de editar los detalles.")
+        take_away=_bool(p.get("take_away",o["take_away"]))
+        active=[d for d in details.values() if d["status"]!="Cancelado"]
+        if take_away!=o["take_away"] and active and all(d["status"]=="Entregado" for d in active):
+            raise ValueError("El pedido ya fue entregado. La modalidad de consumo está bloqueada.")
         _validate_details(rows,details)
         requested=_reserved_quantities(rows,details)
-        db.execute("UPDATE inv_orders SET table_name=?,table_number=?,status='Reservado',version=version+1 WHERE id=?",(table,number_table,order))
+        db.execute("UPDATE inv_orders SET table_name=?,table_number=?,take_away=?,status='Reservado',version=version+1 WHERE id=?",(table,number_table,take_away,order))
     else:
         timestamp=now()
         day=business_day(db)
         if p.get("expected_day",day)!=day:
             raise ValueError("Cambió la jornada. Actualiza la comanda antes de registrarla.")
         number=_next_order_number(db,day)
-        order=db.execute("""INSERT INTO inv_orders(table_name,table_number,status,created,operator,user_id,day,number) OUTPUT INSERTED.id
-                            VALUES(?,?,'Reservado',?,?,?,?,?)""",(table,number_table,timestamp,user["name"],user["id"],day,number)).lastrowid
+        order=db.execute("""INSERT INTO inv_orders(table_name,table_number,status,created,operator,user_id,day,number,take_away) OUTPUT INSERTED.id
+                            VALUES(?,?,'Reservado',?,?,?,?,?,?)""",(table,number_table,timestamp,user["name"],user["id"],day,number,_bool(p.get("take_away",False)))).lastrowid
     if not p.get("id"):
         details={}
         _validate_details(rows,details)
@@ -818,7 +822,7 @@ def _preparation(db,user):
     if user["role"] not in ("admin","area"):
         return []
     query="""SELECT d.order_id,d.detail_no,d.revision,d.sent_product AS product_id,d.area,d.status,d.sent_at,d.started_at,d.ready_at,
-            d.delivered_at,d.delivered_by,o.number,o.day,o.table_number,l.name,d.sent_qty AS qty,
+            d.delivered_at,d.delivered_by,o.number,o.day,o.table_number,o.take_away,l.name,d.sent_qty AS qty,
             CASE WHEN EXISTS (SELECT 1 FROM inv_cancel_requests cr WHERE cr.order_id=o.id AND cr.status='Pendiente')
                  THEN 1 ELSE 0 END AS cancel_pending
             FROM inv_details d JOIN inv_orders o ON o.id=d.order_id

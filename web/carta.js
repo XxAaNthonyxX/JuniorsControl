@@ -1,8 +1,8 @@
 
 "use strict";
-let ticket={lines:[],table_name:"",table_number:null,floor:1,id:null,version:null,code:"",day:""},menuCategory="Todos",menuQuery="";
+let ticket={lines:[],table_name:"",table_number:null,floor:1,take_away:false,id:null,version:null,code:"",day:""},menuCategory="Todos",menuQuery="";
 let orderFilter="Abiertas",orderDay=null,orderQuery="";
-function resetTicket(){ticket={lines:[],table_name:"",table_number:null,floor:1,id:null,version:null,code:"",day:""};menuCategory="Todos";menuQuery="";orderFilter="Abiertas";orderDay=null;orderQuery=""}
+function resetTicket(){ticket={lines:[],table_name:"",table_number:null,floor:1,take_away:false,id:null,version:null,code:"",day:""};menuCategory="Todos";menuQuery="";orderFilter="Abiertas";orderDay=null;orderQuery=""}
 function norm(v){return String(v||"").toLowerCase().normalize("NFD").replace(/[\u0300-\u036f]/g,"")}
 function orderCode(o){return `${h(o.code)} <small class="sub">${h(displayDate(o.day))}</small>`}
 function productBy(id){return S.products.find(p=>p.id===id)}
@@ -55,10 +55,13 @@ function jumpToTicket(){
  return `<button type="button" class="btn ticket-jump" ${bind(()=>jumpTo(".ticket"))}><span>${icon("receipt")} Ver pedido (${units})</span><b>${cash(sumTicket())}</b></button>`;
 }
 function ticketPanel(){
+ const savedOrder=S.orders.find(o=>o.id===ticket.id);
+ const activeDetails=(savedOrder?.details||[]).filter(d=>d.status!=="Cancelado");
+ const modeLocked=activeDetails.length>0&&activeDetails.every(d=>d.status==="Entregado");
  const n=ticket.lines.reduce((a,l)=>a+l.qty,0);
  const preview=ticket.id?null:S.next_order_code;
  const code=ticket.id?ticket.code:preview;
- return `<section class="ticket" tabindex="-1" aria-label="Pedido actual"><header><div class="ticket-icon">${icon("receipt")}</div><div><div class="eyebrow">${ticket.id?"EDITAR COMANDA":"NUEVA COMANDA"}</div><h2>${code?h(code):"Pedido actual"}</h2>${preview?'<p class="sub">Número provisional hasta registrar</p>':""}</div>${button("Volver a la carta",()=>jumpTo(".catalog"),"link catalog-jump")}</header><div class="ticket-ref"><div class="grid2">
+ return `<section class="ticket" tabindex="-1" aria-label="Pedido actual"><header><div class="ticket-icon">${icon("receipt")}</div><div><div class="eyebrow">${ticket.id?"EDITAR COMANDA":"NUEVA COMANDA"}</div><h2>${code?h(code):"Pedido actual"}</h2>${preview?'<p class="sub">Número provisional hasta registrar</p>':""}</div>${button("Volver a la carta",()=>jumpTo(".catalog"),"link catalog-jump")}</header><div class="ticket-ref"><label class="field"><span>Modalidad de consumo</span><select name="take_away" ${modeLocked?"disabled":""}><option value="0" ${!ticket.take_away?"selected":""}>En el local</option><option value="1" ${ticket.take_away?"selected":""}>Para llevar</option></select></label>${modeLocked?'<small class="muted">Pedido entregado · modalidad bloqueada</small>':""}<div class="grid2">
  ${select("piso","Piso",[[1,"Piso 1 · Mesas 1 a 10"],[2,"Piso 2 · Mesas 11 a 20"]],ticket.floor||1)}
  <label class="field"><span>Número de mesa</span><select id="mesa" name="table_number" required><option value="">Selecciona mesa</option>${Array.from({length:10},(_,i)=>(ticket.floor===2?11:1)+i).map(n=>{
  const occupied=(S.orders||[]).some(o=>o.day===(ticket.day||S.today)&&["Reservado","Por revisar"].includes(o.status)&&o.id!==ticket.id&&(Number(o.table_number)===n||(!o.table_number&&["Mesa "+n,String(n)].includes(o.table_name))));
@@ -72,20 +75,20 @@ function posBody(){
 }
 function attentionPage(){
  const open=S.orders.filter(o=>o.day===S.today&&["Reservado","Por revisar"].includes(o.status)&&!o.cancel_request);
- const rows=open.map(o=>[h(o.code),h(o.table_name),h(displayOrderStatus(o)),
+ const rows=open.map(o=>[h(o.code),h(o.table_name),h(displayOrderStatus(o))+" · "+(o.take_away?"Para llevar":"En el local"),
    button("Editar",()=>editOrder(o),"secondary")+(o.details.some(d=>d.pending)?button("Enviar a preparación",()=>sendToPreparation(o),"primary"):"")]);
  return posBody()+(rows.length?panel("Comandas en atención",table(["Comanda","Mesa","Estado","Acciones"],rows)):"");
 }
 function drawPOS(){if(route==="atencion"){document.querySelector("#view").innerHTML=attentionPage();prune()}}
 pages.atencion=attentionPage;
 async function saveTicket(){if(!ticket.table_number){document.querySelector("#mesa")?.focus();toast("Selecciona primero un piso y una mesa disponible.",true);return}
- const payload={expected_day:ticket.day||S.today,table_number:ticket.table_number,lines:ticket.lines.map(({detail_no,product_id,qty})=>({detail_no,product_id,qty}))};
+ const payload={take_away:ticket.take_away,expected_day:ticket.day||S.today,table_number:ticket.table_number,lines:ticket.lines.map(({detail_no,product_id,qty})=>({detail_no,product_id,qty}))};
  if(ticket.id)Object.assign(payload,{id:ticket.id,version:ticket.version});
  const b=document.querySelector(".ticket-bottom .primary");if(b)b.disabled=true;
  try{const result=await api("pedidos.save",payload);const edited=ticket.id;resetTicket();await reload();orderFilter="Abiertas";orderDay=null;orderQuery="";go("atencion");toast(`${result.code} ${edited?"actualizada":"registrada"}. Insumos reservados.`)}finally{if(b)b.disabled=false}
 }
 function editOrder(o){
- const change=()=>{ticket={id:o.id,version:o.version,code:o.code,day:o.day,table_name:o.table_name,table_number:o.table_number||Number(String(o.table_name).replace(/^Mesa /i,"")),floor:o.floor||(Number(o.table_number||String(o.table_name).replace(/^Mesa /i,""))>10?2:1),lines:o.details.map(l=>({...l}))};menuQuery="";menuCategory="Todos";go("atencion")};
+ const change=()=>{ticket={take_away:!!o.take_away,id:o.id,version:o.version,code:o.code,day:o.day,table_name:o.table_name,table_number:o.table_number||Number(String(o.table_name).replace(/^Mesa /i,"")),floor:o.floor||(Number(o.table_number||String(o.table_name).replace(/^Mesa /i,""))>10?2:1),lines:o.details.map(l=>({...l}))};menuQuery="";menuCategory="Todos";go("atencion")};
  if(ticket.lines.length&&ticket.id!==o.id){modal("Cambiar de comanda","<p>Se descartarán los cambios del borrador abierto en atención.</p>",async()=>change(),"Continuar")}else{change()}
 }
 function chargeOrder(o){
@@ -152,7 +155,7 @@ function details(o,manageReturns=false){
  const returns=(o.returns||[]).map(r=>[h(r.code),h(r.name),h(r.qty),h(r.reason)+(r.undone_at?`<small class="sub">Revertida · ${h(r.undone_by)}</small>`:"")+(r.replacement_sale_code?`<small class="sub">Reemplazo · ${h(r.replacement_sale_code)}</small>`:""),h(r.operator)]);
  const origin=o.exchange_origin;
  const source=origin?`<p class="notice">Reemplazo ${h(origin.exchange_code)} de la venta ${h(origin.sale_code)} · ${h(origin.code)} del ${h(displayDate(origin.day))} · Devolución ${h(origin.return_code)}.</p>`:"";
- modal(o.code+" · "+o.table_name,`${o.sale_void?`<p class="notice">Venta anulada · ${h(o.sale_void.actor)} · ${h(o.sale_void.at)} · ${h(o.sale_void.reason)}</p>`:""}${source}${table(["Detalle","Producto","Cantidad","Estado"],o.details.map(d=>[d.detail_no,h(d.name),d.qty,h(d.pending?"Pendiente de envío":d.status)]))}<div class="summary"><span>${h(displayDate(o.day))} · ${h(o.operator)}</span>${badge(o.status)}</div>${table(["Producto","Uds.","Precio","Preparación / entrega","Dev.","Neto",""],rows)}<div class="total"><strong>Total neto</strong><strong>${cash(o.total)}</strong></div>${o.paid_at?`<p class="muted">Venta ${h(o.sale_code)} · Cobro registrado el ${h(o.paid_at)} por ${h(o.cashier)}.</p>`:""}${returns.length?`<h3>Devoluciones</h3>${table(["Código","Producto","Uds.","Motivo","Responsable"],returns)}`:""}`,null);
+ modal(o.code+" · "+o.table_name,`${o.sale_void?`<p class="notice">Venta anulada · ${h(o.sale_void.actor)} · ${h(o.sale_void.at)} · ${h(o.sale_void.reason)}</p>`:""}${source}<p class="notice">${o.take_away?"Para llevar":"En el local"}</p>${table(["Detalle","Producto","Cantidad","Estado"],o.details.map(d=>[d.detail_no,h(d.name),d.qty,h(d.pending?"Pendiente de envío":d.status)]))}<div class="summary"><span>${h(displayDate(o.day))} · ${h(o.operator)}</span>${badge(o.status)}</div>${table(["Producto","Uds.","Precio","Preparación / entrega","Dev.","Neto",""],rows)}<div class="total"><strong>Total neto</strong><strong>${cash(o.total)}</strong></div>${o.paid_at?`<p class="muted">Venta ${h(o.sale_code)} · Cobro registrado el ${h(o.paid_at)} por ${h(o.cashier)}.</p>`:""}${returns.length?`<h3>Devoluciones</h3>${table(["Código","Producto","Uds.","Motivo","Responsable"],returns)}`:""}`,null);
 }
 function viewOrdersDay(day){
  orderDay=day;orderQuery="";orderFilter="Todas";go("comandas");
@@ -168,9 +171,12 @@ function orderTable(){
  if(["admin","caja","atencion"].includes(S.user.role)&&["Reservado","Por revisar"].includes(o.status)){
    if(o.cancel_request)acts+='<small class="muted">Envío bloqueado por solicitud de cancelación.</small>';
    else if(o.status==="Por revisar")acts+='<small class="muted">Revisa y guarda la comanda desde Atención antes de enviarla.</small>';
-   else if(o.details.some(d=>d.pending))acts+=button("Enviar al área de preparación",()=>sendToPreparation(o),"primary");
+   else {
+     acts+=button("Editar comanda",()=>editOrder(o),"secondary");
+     if(o.details.some(d=>d.pending))acts+=button("Enviar al área de preparación",()=>sendToPreparation(o),"primary");
+   }
  }
- return [`<b class="mono">${orderCode(o)}</b>`,`<strong>${h(o.table_name)}</strong><small class="sub">${o.floor?`Piso ${o.floor}`:"Anterior a la actualización"}</small>`,badge(displayOrderStatus(o))+(o.cancel_request?`<small class="sub">${h(o.cancel_request.reason)}</small>`:""),h(o.created),cash(o.total),`<div class="actions">${acts}</div>`]}),"No hay comandas que coincidan con estos filtros.");
+ return [`<b class="mono">${orderCode(o)}</b>`,`<strong>${h(o.table_name)}</strong><small class="sub">${o.take_away?"Para llevar":"En el local"}</small><small class="sub">${o.floor?`Piso ${o.floor}`:"Anterior a la actualización"}</small>`,badge(displayOrderStatus(o))+(o.cancel_request?`<small class="sub">${h(o.cancel_request.reason)}</small>`:""),h(o.created),cash(o.total),`<div class="actions">${acts}</div>`]}),"No hay comandas que coincidan con estos filtros.");
 }
 pages.comandas=()=>{
  const statuses=S.user.role==="atencion"?["Abiertas"]:["Abiertas","Cobradas","Canceladas","Todas"];if(!statuses.includes(orderFilter))orderFilter=statuses[0];
@@ -183,6 +189,7 @@ pages.comandas=()=>{
  return `<div class="metrics">${metrics.map(([label,value])=>`<div class="metric"><span>${h(label)}</span><b class="value">${h(value)}</b></div>`).join("")}</div><section class="panel"><header class="panel-head"><h2>Registro de comandas</h2></header><div class="panel-body"><div class="actions filters"><div class="tabs">${statuses.map(s=>`<button class="${s===orderFilter?"active":""}" ${bind(()=>{orderFilter=s;render()})}>${h(s)}</button>`).join("")}</div><label class="search">${icon("search")}<input id="order-search" placeholder="Código o mesa" aria-label="Buscar comanda" value="${h(orderQuery)}"></label><input type="date" id="order-day" value="${h(orderDay??S.today)}" aria-label="Fecha de comanda"></div><div id="order-list">${orderTable()}</div></div></section>`;
 };
 document.addEventListener("input",e=>{
+ if(e.target.name==="take_away" && e.target.closest(".ticket-ref"))ticket.take_away=e.target.value==="1";
  if(e.target.name==="piso" && e.target.closest(".ticket-ref")){
    ticket.floor=Number(e.target.value);ticket.table_number=null;ticket.table_name="";drawPOS();
  }

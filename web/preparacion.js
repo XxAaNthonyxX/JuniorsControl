@@ -3,7 +3,7 @@
 (() => {
  function card(r){
   const controls=r.cancel_pending?'<span class="badge amber">Cancelación pendiente · en pausa</span>':r.status!=="Entregado"?button("Marcar como entregado",()=>deliver(r),"primary"):'<span class="badge green">Entregado</span>';
-  return `<article class="prep-card"><div><strong>${h(r.code)} · Detalle ${r.detail_no} · ${h(r.name)}</strong><small class="sub">${h(r.day)} · Piso ${r.table_number?Number(r.table_number)>10?2:1:"?"} · Mesa ${h(r.table_number||"-")} · ${h(r.qty)} unidades</small></div><div class="prep-status">${badge(r.status)} <span class="muted">${h(r.area)}</span></div><div class="muted">Enviado: ${h(r.sent_at||"-")}${r.started_at?" · Iniciado: "+h(r.started_at):""}${r.ready_at?" · Listo: "+h(r.ready_at):""} · Entregado: ${h(r.delivered_at||"-")}</div>${controls}</article>`;
+  return `<article class="prep-card"><div><strong>${h(r.code)} · Detalle ${r.detail_no} · ${h(r.name)}</strong><small class="sub">${h(r.day)} · Piso ${r.table_number?Number(r.table_number)>10?2:1:"?"} · Mesa ${h(r.table_number||"-")} · ${h(r.qty)} unidades</small></div><div class="prep-status">${badge(r.status)} ${badge(r.take_away?"Para llevar":"En el local")} <span class="muted">${h(r.area)}</span></div><div class="muted">Enviado: ${h(r.sent_at||"-")}${r.started_at?" · Iniciado: "+h(r.started_at):""}${r.ready_at?" · Listo: "+h(r.ready_at):""} · Entregado: ${h(r.delivered_at||"-")}</div>${controls}</article>`;
  }
  async function deliver(r){
   await run("pedidos.prep",{id:r.order_id,product_id:r.product_id,detail_no:r.detail_no,revision:r.revision,step:"entregar"},"Producto marcado como entregado");

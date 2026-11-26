@@ -70,21 +70,38 @@ function posBody(){
  const cats=["Todos",...new Set(S.products.map(p=>p.category))];if(!cats.includes(menuCategory))menuCategory="Todos";
  return `<div class="pos"><section class="catalog" tabindex="-1" aria-label="Carta del local"><div class="catalog-head"><div><h2>Carta del local</h2><span class="catalog-count">${S.products.length} productos</span></div><label class="search">${icon("search")}<input id="menu-search" aria-label="Buscar en la carta" placeholder="Buscar producto" value="${h(menuQuery)}"></label></div><div class="tabs menu-tabs">${cats.map(c=>`<button class="${c===menuCategory?"active":""}" ${bind(()=>{menuCategory=c;drawPOS()})}>${h(c)}</button>`).join("")}</div><div id="cards">${menuCards()}</div>${jumpToTicket()}</section>${ticketPanel()}</div>`;
 }
-function drawPOS(){if(route==="atencion"){document.querySelector("#view").innerHTML=posBody();prune()}}
-pages.atencion=posBody;
+function attentionPage(){
+ const open=S.orders.filter(o=>o.day===S.today&&["Reservado","Por revisar"].includes(o.status)&&!o.cancel_request);
+ const rows=open.map(o=>[h(o.code),h(o.table_name),h(displayOrderStatus(o)),
+   button("Editar",()=>editOrder(o),"secondary")+(o.details.some(d=>d.pending)?button("Enviar a preparación",()=>sendToPreparation(o),"primary"):"")]);
+ return posBody()+(rows.length?panel("Comandas en atención",table(["Comanda","Mesa","Estado","Acciones"],rows)):"");
+}
+function drawPOS(){if(route==="atencion"){document.querySelector("#view").innerHTML=attentionPage();prune()}}
+pages.atencion=attentionPage;
 async function saveTicket(){if(!ticket.table_number){document.querySelector("#mesa")?.focus();toast("Selecciona primero un piso y una mesa disponible.",true);return}
  const payload={expected_day:ticket.day||S.today,table_number:ticket.table_number,lines:ticket.lines.map(({detail_no,product_id,qty})=>({detail_no,product_id,qty}))};
  if(ticket.id)Object.assign(payload,{id:ticket.id,version:ticket.version});
  const b=document.querySelector(".ticket-bottom .primary");if(b)b.disabled=true;
- try{const result=await api("pedidos.save",payload);const edited=ticket.id;resetTicket();await reload();orderFilter="Abiertas";orderDay=null;orderQuery="";go("comandas");toast(`${result.code} ${edited?"actualizada":"registrada"}. Insumos reservados.`)}finally{if(b)b.disabled=false}
+ try{const result=await api("pedidos.save",payload);const edited=ticket.id;resetTicket();await reload();orderFilter="Abiertas";orderDay=null;orderQuery="";go("atencion");toast(`${result.code} ${edited?"actualizada":"registrada"}. Insumos reservados.`)}finally{if(b)b.disabled=false}
 }
 function editOrder(o){
  const change=()=>{ticket={id:o.id,version:o.version,code:o.code,day:o.day,table_name:o.table_name,table_number:o.table_number||Number(String(o.table_name).replace(/^Mesa /i,"")),floor:o.floor||(Number(o.table_number||String(o.table_name).replace(/^Mesa /i,""))>10?2:1),lines:o.details.map(l=>({...l}))};menuQuery="";menuCategory="Todos";go("atencion")};
  if(ticket.lines.length&&ticket.id!==o.id){modal("Cambiar de comanda","<p>Se descartarán los cambios del borrador abierto en atención.</p>",async()=>change(),"Continuar")}else{change()}
 }
-function transition(o,pay){
- const confirmedDay=S.today;
- modal((pay?"Cobrar ":"Cancelar ")+o.code,`<div class="summary"><span>${h(o.table_name)} · ${h(displayDate(o.day))}</span><b>${cash(o.total)}</b></div>${pay?select("payment_method","Medio de pago",["Efectivo","Yape","Tarjeta"].map(m=>[m,m])):""}<p>${pay?"Al confirmar el cobro, caja registrará la venta y descontará los insumos reservados.":"Al cancelar la comanda se liberarán sus reservas."}</p>`,async values=>{await run(pay?"pedidos.pay":"pedidos.cancel",{id:o.id,version:o.version,payment_method:values.payment_method,expected_day:confirmedDay,expected_cents:Math.round(o.total*100)},`${o.code} ${pay?"cobrada":"cancelada"}.`);if(ticket.id===o.id)resetTicket()},pay?"Confirmar cobro":"Cancelar comanda");
+function chargeOrder(o){
+ const day=S.today;
+ const delivered=o.details.filter(d=>d.status==="Entregado");
+ const cents=delivered.reduce((sum,d)=>sum+Math.round(d.price*100)*d.qty,0);
+ const fields=`<div class="summary"><span>${h(o.table_name)} · ${h(displayDate(o.day))}</span></div>
+   <div class="line"><span>Solicitado</span><b>${cash(o.total)}</b></div>`+
+   table(["Producto entregado","Cantidad","Importe"],delivered.map(d=>[h(d.name),d.qty,cash(d.price*d.qty)]))+
+   `<div class="total"><strong>A cobrar ahora</strong><strong>${cash(cents/100)}</strong></div>`+
+   select("payment_method","Medio de pago",["Efectivo","Yape","Tarjeta"].map(m=>[m,m]))+
+   "<p>Al cobrar se cerrará la comanda y se cancelarán los detalles pendientes.</p>";
+ modal("Cobrar "+o.code,fields,async values=>{
+   await run("pedidos.pay",{id:o.id,version:o.version,payment_method:values.payment_method,expected_day:day,expected_cents:cents},o.code+" cobrada.");
+   if(ticket.id===o.id)resetTicket();
+ },"Confirmar cobro");
 }
 function refund(o,l,exchange=false){
  const max=l.qty-l.refunded, alternatives=S.products.filter(p=>p.id!==l.product_id);
@@ -97,7 +114,7 @@ function refund(o,l,exchange=false){
  const fields=`<p><b>${h(l.name)}</b> · ${cash(l.price)} por unidad</p>`+
    input("qty","Unidades a devolver","number",1,`required step=1 min=1 max=${max}`)+replaceFields+
    input("reason",exchange?"Motivo del cambio":"Motivo de la devolución","text","","required maxlength=300")+
-   `<fieldset><legend>Insumos aptos para regresar al lote original</legend>${restockFields}</fieldset>`;
+   `<fieldset><legend>Reposición de inventario</legend><p>Marca los insumos que regresan al lote. Deja todas las casillas vacías para devolver solo el importe.</p>${restockFields}</fieldset>`;
  function difference(values){return Math.round(productBy(Number(values.replacement_id)).price*100)*Number(values.replacement_qty)-Math.round(l.price*100)*Number(values.qty)}
  const dialog=modal((exchange?"Cambio en ":"Devolución de ")+o.code,fields,async values=>{
    const data={id:o.id,version:o.version,product_id:l.product_id,qty:values.qty,reason:values.reason,restock:l.ingredients.filter(i=>values["rec_"+i.item_id]).map(i=>i.item_id)};
@@ -129,13 +146,13 @@ function displayOrderStatus(o){
  if(o.details.every(l=>l.status==="Entregado"))return "Entregada · por cobrar";
  return "En preparación";
 }
-function details(o){
- const mayCharge=["admin","caja"].includes(S.user.role);
+function details(o,manageReturns=false){
+ const mayCharge=manageReturns&&["admin","caja"].includes(S.user.role);
  const rows=o.lines.map(l=>[h(l.name),h(l.qty),cash(l.price),h(l.prep_status||"Sin enviar")+(l.prep?.delivered_at?`<small class="sub">${h(l.prep.delivered_at)}</small>`:""),h(l.refunded),cash((l.qty-l.refunded)*l.price),o.status==="Cobrado"&&mayCharge&&l.qty>l.refunded?'<div class="actions">'+button("Devolver",()=>refund(o,l),"link")+button("Cambiar",()=>refund(o,l,true),"secondary")+'</div>':""]);
  const returns=(o.returns||[]).map(r=>[h(r.code),h(r.name),h(r.qty),h(r.reason)+(r.undone_at?`<small class="sub">Revertida · ${h(r.undone_by)}</small>`:"")+(r.replacement_sale_code?`<small class="sub">Reemplazo · ${h(r.replacement_sale_code)}</small>`:""),h(r.operator)]);
  const origin=o.exchange_origin;
  const source=origin?`<p class="notice">Reemplazo ${h(origin.exchange_code)} de la venta ${h(origin.sale_code)} · ${h(origin.code)} del ${h(displayDate(origin.day))} · Devolución ${h(origin.return_code)}.</p>`:"";
- modal(o.code+" · "+o.table_name,`${source}${table(["Detalle","Producto","Cantidad","Estado"],o.details.map(d=>[d.detail_no,h(d.name),d.qty,h(d.pending?"Pendiente de envío":d.status)]))}<div class="summary"><span>${h(displayDate(o.day))} · ${h(o.operator)}</span>${badge(o.status)}</div>${table(["Producto","Uds.","Precio","Preparación / entrega","Dev.","Neto",""],rows)}<div class="total"><strong>Total neto</strong><strong>${cash(o.total)}</strong></div>${o.paid_at?`<p class="muted">Venta ${h(o.sale_code)} · Cobro registrado el ${h(o.paid_at)} por ${h(o.cashier)}.</p>`:""}${returns.length?`<h3>Devoluciones</h3>${table(["Código","Producto","Uds.","Motivo","Responsable"],returns)}`:""}`,null);
+ modal(o.code+" · "+o.table_name,`${o.sale_void?`<p class="notice">Venta anulada · ${h(o.sale_void.actor)} · ${h(o.sale_void.at)} · ${h(o.sale_void.reason)}</p>`:""}${source}${table(["Detalle","Producto","Cantidad","Estado"],o.details.map(d=>[d.detail_no,h(d.name),d.qty,h(d.pending?"Pendiente de envío":d.status)]))}<div class="summary"><span>${h(displayDate(o.day))} · ${h(o.operator)}</span>${badge(o.status)}</div>${table(["Producto","Uds.","Precio","Preparación / entrega","Dev.","Neto",""],rows)}<div class="total"><strong>Total neto</strong><strong>${cash(o.total)}</strong></div>${o.paid_at?`<p class="muted">Venta ${h(o.sale_code)} · Cobro registrado el ${h(o.paid_at)} por ${h(o.cashier)}.</p>`:""}${returns.length?`<h3>Devoluciones</h3>${table(["Código","Producto","Uds.","Motivo","Responsable"],returns)}`:""}`,null);
 }
 function viewOrdersDay(day){
  orderDay=day;orderQuery="";orderFilter="Todas";go("comandas");
@@ -143,20 +160,11 @@ function viewOrdersDay(day){
 function filteredOrders(){
  const q=norm(orderQuery),day=orderDay??S.today;
  return S.orders.filter(o=>(!day||o.day===day)&&(!q||norm(o.code+" "+(o.sale_code||"")+" "+o.table_name+" "+o.operator).includes(q))&&
- (orderFilter==="Todas"||orderFilter==="Abiertas"&&["Reservado","Por revisar"].includes(o.status)||orderFilter==="Cobradas"&&["Cobrado","Devuelto"].includes(o.status)||orderFilter==="Canceladas"&&o.status==="Cancelado"));
+ (orderFilter==="Todas"||orderFilter==="Abiertas"&&["Reservado","Por revisar"].includes(o.status)||orderFilter==="Cobradas"&&["Cobrado","Devuelto"].includes(o.status)||orderFilter==="Canceladas"&&["Anulada","Cancelado"].includes(o.status)));
 }
 function orderTable(){
- const mayCharge=["admin","caja"].includes(S.user.role);
  return table(["Comanda","Piso / Mesa","Estado","Creada","Total","Acciones"],filteredOrders().map(o=>{
- const open=["Reservado","Por revisar"].includes(o.status);
- let acts=button("Ver",()=>details(o),"link");
- if(open&&!o.cancel_request){
-   acts+=button("Editar",()=>editOrder(o),"secondary");
-   if(o.details.some(l=>l.pending))acts+=button("Enviar a preparación",()=>sendToPreparation(o),"primary");
-   if(!o.details.some(l=>l.status==="Entregado"))acts+=button("Solicitar cancelación",()=>requestCancel(o),"secondary");
- }
- if(open&&o.cancel_request&&mayCharge)acts+=button("Resolver solicitud",()=>decideCancel(o),"secondary");
- if(mayCharge&&open&&!o.cancel_request&&o.lines.length&&o.details.every(l=>l.status==="Entregado"))acts+=button("Cobrar",()=>transition(o,true),"primary");
+ const acts=button("Ver detalle de comanda",()=>details(o),"secondary");
  return [`<b class="mono">${orderCode(o)}</b>`,`<strong>${h(o.table_name)}</strong><small class="sub">${o.floor?`Piso ${o.floor}`:"Anterior a la actualización"}</small>`,badge(displayOrderStatus(o))+(o.cancel_request?`<small class="sub">${h(o.cancel_request.reason)}</small>`:""),h(o.created),cash(o.total),`<div class="actions">${acts}</div>`]}),"No hay comandas que coincidan con estos filtros.");
 }
 pages.comandas=()=>{
@@ -167,7 +175,7 @@ pages.comandas=()=>{
    metrics.push(["Comandas",periodOrders.length]);
    if(day)metrics.push(["Ingreso neto de la jornada",cash(ventasPeriodo(S.orders,day,day).net/100)]);
  }
- return `<div class="metrics">${metrics.map(([label,value])=>`<div class="metric"><span>${h(label)}</span><b class="value">${h(value)}</b></div>`).join("")}</div><section class="panel"><header class="panel-head"><h2>Registro de comandas</h2>${button("Nueva comanda",()=>go("atencion"),"primary")}</header><div class="panel-body"><div class="actions filters"><div class="tabs">${statuses.map(s=>`<button class="${s===orderFilter?"active":""}" ${bind(()=>{orderFilter=s;render()})}>${h(s)}</button>`).join("")}</div><label class="search">${icon("search")}<input id="order-search" placeholder="Código o mesa" aria-label="Buscar comanda" value="${h(orderQuery)}"></label><input type="date" id="order-day" value="${h(orderDay??S.today)}" aria-label="Fecha de comanda"></div><div id="order-list">${orderTable()}</div></div></section>`;
+ return `<div class="metrics">${metrics.map(([label,value])=>`<div class="metric"><span>${h(label)}</span><b class="value">${h(value)}</b></div>`).join("")}</div><section class="panel"><header class="panel-head"><h2>Registro de comandas</h2></header><div class="panel-body"><div class="actions filters"><div class="tabs">${statuses.map(s=>`<button class="${s===orderFilter?"active":""}" ${bind(()=>{orderFilter=s;render()})}>${h(s)}</button>`).join("")}</div><label class="search">${icon("search")}<input id="order-search" placeholder="Código o mesa" aria-label="Buscar comanda" value="${h(orderQuery)}"></label><input type="date" id="order-day" value="${h(orderDay??S.today)}" aria-label="Fecha de comanda"></div><div id="order-list">${orderTable()}</div></div></section>`;
 };
 document.addEventListener("input",e=>{
  if(e.target.name==="piso" && e.target.closest(".ticket-ref")){

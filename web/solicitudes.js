@@ -8,13 +8,10 @@
      v=>run("pedidos.request_refund",{id:r.id,product_id:r.product_id,qty:v.qty,reason:v.reason},"Solicitud registrada"));
  }
  function decide(r,approve){
-   const line=S.orders.find(o=>o.id===r.order_id)?.lines.find(l=>l.product_id===r.product_id);
-   const ingredients=line?.ingredients||[];
-   const fields=approve?`<fieldset><legend>Insumos aptos para volver al lote original</legend>${ingredients.map(i=>
-     `<label class="check"><input type="checkbox" name="rec_${i.item_id}">${h(i.name)}</label>`).join("")}</fieldset>`:
+   const fields=approve?"<p>Al aprobar se repondrán en sus lotes todos los insumos de las unidades devueltas.</p>":
      input("reason","Motivo del rechazo","text","","required maxlength=300");
    modal(approve?"Aprobar devolución":"Rechazar devolución",`<p>${h(reference(r))} · ${r.qty} × ${h(r.name)}</p><p>${h(r.reason)}</p>`+fields,
-     v=>run("pedidos.resolve_refund",{id:r.id,revision:r.revision,approve,reason:v.reason,restock:ingredients.filter(i=>v["rec_"+i.item_id]).map(i=>i.item_id)},
+     v=>run("pedidos.resolve_refund",{id:r.id,revision:r.revision,approve,reason:v.reason},
        approve?"Devolución registrada en caja":"Solicitud rechazada"),approve?"Confirmar devolución":"Rechazar");
  }
  function undo(r,kind){

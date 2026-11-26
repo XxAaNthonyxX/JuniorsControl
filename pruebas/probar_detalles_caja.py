@@ -49,7 +49,7 @@ def run():
     rechazado(ValueError,lambda: act("save",lines=details(6)))
     act("save",lines=details(1,1))
     assert len(snapshot()["preparation"])==1
-    rechazado(ValueError,lambda: act("pay",payment_method="Yape"))
+    rechazado(ValueError,lambda: act("pay",payment_method="Yape",expected_cents=4400))
     act("send")
     second=next(r for r in snapshot()["preparation"] if r["detail_no"]==2)
     act("save",lines=details(1,6))
@@ -81,8 +81,11 @@ def run():
     key=snapshot()["service_requests"]["refunds"][0]["id"]
     lot_balances=lambda: {l["id"]:l["physical"] for l in snapshot()["lots"]}
     before_refund=lot_balances()
-    ingredient=order()["lines"][0]["ingredients"][0]["item_id"]
-    action(inv,"pedidos.resolve_refund",dict(id=key,approve=True,restock=[ingredient]))
+    action(inv,"pedidos.resolve_refund",dict(id=key,approve=True))
+    with closing(sqlserver.connect()) as db, db:
+        parts=db.execute("""SELECT amount,restocked FROM refund_parts p JOIN refund_requests r
+                            ON r.return_id=p.return_id WHERE r.id=?""",(key,)).fetchall()
+        assert parts and all(amount==restocked for amount,restocked in parts)
     assert lot_balances()!=before_refund
     rechazado(ValueError,action,inv,"pedidos.resolve_refund",dict(id=key,approve=True))
     assert order()["total"]==22 and len(order()["returns"])==1
@@ -134,6 +137,35 @@ def run():
         assert inv.today() in registry and inv.business_day(db)=="2020-02-29"
         assert "registered_days" not in gestion.state(db,waiter)
         assert db.execute("SELECT COUNT(*) FROM cash_days WHERE day=?",("2020-02-29",)).fetchone()[0]==1
+    # Dos unidades iguales, una entregada y una pendiente: sólo se factura la primera.
+    action(inv,"pedidos.save",dict(table_number=11,lines=details(6,6)))
+    rechazado(ValueError,lambda: act("void_sale",reason="Sin entregas"))
+    act("send")
+    deliver(next(r for r in snapshot()["preparation"] if r["order_id"]==order()["id"]))
+    before=lot_balances()
+    act("pay",expected_cents=500)
+    sold=order()
+    assert sold["total"]==5 and len(sold["details"])==2 and sold["lines"][0]["qty"]==1
+    assert sorted(d["status"] for d in sold["details"])==["Cancelado","Entregado"]
+    assert sum(d["price"]*d["qty"] for d in sold["details"])==10
+    after=lot_balances()
+    assert before!=after
+    assert act("void_sale",reason="Venta incorrecta")["void_cents"]==500
+    assert lot_balances()==after and order()["status"]=="Anulada"
+    rechazado(ValueError,lambda: act("void_sale",reason="Duplicada"))
+    action(inv,"pedidos.save",dict(table_number=11,lines=details(6,6)))
+    act("send")
+    deliver(next(r for r in snapshot()["preparation"] if r["order_id"]==order()["id"]))
+    assert act("void_sale",reason="Anular antes del cobro")["void_cents"]==0
+    assert order()["status"]=="Anulada" and not order()["paid_at"]
+    action(inv,"pedidos.save",dict(table_number=11,lines=details(6)))
+    act("send")
+    deliver(next(r for r in snapshot()["preparation"] if r["order_id"]==order()["id"]))
+    act("pay",expected_cents=500)
+    before=lot_balances()
+    act("refund",product_id=6,qty=1,reason="Sin reposición",restock=[])
+    assert lot_balances()==before and order()["status"]=="Devuelto"
+    print("Cobro parcial con cierre, anulación antes y después del pago y devolución directa verificados.")
     print("Registro persistente, reapertura, permisos y conflicto entre jornadas verificados.")
     print("Detalles, envío, entrega, cobro único con Yape y arqueo verificados.")
 

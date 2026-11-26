@@ -5,7 +5,7 @@ const roleNames = {admin:"Administración",caja:"Caja",atencion:"Atención",area
 const nav = [
   ["atencion","Atención","grid","OPERACIÓN",["admin","caja","atencion"],"Sala y pedidos","Selecciona los productos para armar una comanda."],
   ["preparacion","Preparación y entregas","plate","",["admin","area"],"Pedidos en preparación","Consulta solamente los pedidos de tu área y marca su avance."],
-  ["comandas","Comandas","receipt","",["admin","caja","atencion"],"Comandas","Consulta las reservas, cobra pedidos y revisa las ventas."],
+  ["comandas","Comandas","receipt","",["admin","caja","atencion"],"Comandas","Consulta las comandas y los productos de cada mesa."],
   ["solicitudes","Solicitudes y devoluciones","receipt","",["admin","caja","atencion"],"Solicitudes y devoluciones","Consulta el estado de las anulaciones y devoluciones."],
   ["carta","Carta y categorías","plate","",["admin","area"],"Carta y categorías","Productos por categoría y área de preparación."],
   ["jornadas","Jornadas","calendar","",["admin","caja"],"Registro de jornadas","Consulta una fecha o ábrela para trabajar con ella en todo el local."],

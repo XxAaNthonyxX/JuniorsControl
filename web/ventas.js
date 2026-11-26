@@ -3,7 +3,7 @@
 
 // Importes en céntimos. Los cobros y devoluciones pertenecen al día de su propia operación.
 function ventasPeriodo(orders,start,end){
- const report={count:0,gross:0,refunded:0,net:0,unlocated:0,entries:[]};
+ const report={count:0,gross:0,refunded:0,voided:0,net:0,unlocated:0,entries:[]};
  const rows=new Map();
  function addLine(line,quantity,cents,isReturn){
    let row=rows.get(line.product_id);
@@ -12,6 +12,12 @@ function ventasPeriodo(orders,start,end){
  }
  const inRange=at=>at&&at.slice(0,10)>=start&&at.slice(0,10)<=end;
  for(const o of orders){
+   const v=o.sale_void;
+   if(v&&inRange(v.cash_day)){
+     report.voided+=v.cents;
+     report.entries.push({at:v.at,kind:"Anulación de venta",code:o.sale_code||o.code,order:o.code,day:o.day,mesa:o.table_name,who:v.actor,amount:-v.cents,id:o.id});
+     if(o.paid_at)for(const l of o.lines)addLine(l,-(l.qty-l.refunded),-Math.round(l.price*100)*(l.qty-l.refunded),false);
+   }
    if(!o.paid_at)continue;
    const credits=new Map();
    if(inRange(o.cash_day||o.paid_at)){
@@ -40,7 +46,7 @@ function ventasPeriodo(orders,start,end){
      report.unlocated+=Math.max(0,l.refunded-(credits.get(l.product_id)||0))*Math.round(l.price*100);
    }
  }
- report.net=report.gross-report.refunded;
+ report.net=report.gross-report.refunded-report.voided;
  report.products=[...rows.values()].sort((a,b)=>b.amount-a.amount||a.name.localeCompare(b.name,"es"));
  report.entries.sort((a,b)=>b.at.localeCompare(a.at)||b.id-a.id||a.kind.localeCompare(b.kind));
  return report;
@@ -72,6 +78,26 @@ function ventasPeriodo(orders,start,end){
    return panel("Jornada activa · "+displayDate(S.today),table(["Fecha","Estado","Comandas","Registrada por","Fecha de registro","Acciones"],rows),
      button("Abrir fecha",()=>openDay(),"primary"));
  };
+ function voidButton(o){
+   if(!o||o.sale_void||!o.details.some(d=>d.status==="Entregado"))return "";
+   return button("Anular venta",()=>{
+     const day=S.today;
+     const message=o.paid_at?"Se revertirá en caja el importe pendiente de devolución: "+cash(o.total)+".":
+       "Se cerrará la comanda, se cancelarán los productos pendientes y se registrará el consumo de los entregados.";
+     modal("Anular venta · "+o.code,`<p>${h(message)}</p>`+input("reason","Motivo","text","","required maxlength=300"),
+       v=>run("pedidos.void_sale",{id:o.id,version:o.version,expected_day:day,reason:v.reason},"Venta anulada"),"Confirmar anulación");
+   },"secondary");
+ }
+ function collectionPanel(){
+   const orders=S.orders.filter(o=>o.day===S.today&&["Reservado","Por revisar"].includes(o.status)&&!o.cancel_request&&o.details.some(d=>d.status==="Entregado"));
+   const rows=orders.map(o=>{
+     const delivered=o.details.filter(d=>d.status==="Entregado");
+     const cents=delivered.reduce((total,d)=>total+Math.round(d.price*100)*d.qty,0);
+     return [h(o.code),h(o.table_name),cash(o.total),money(cents),
+       button("Cobrar",()=>chargeOrder(o),"primary")+voidButton(o)];
+   });
+   return panel("Comandas con entregas",table(["Comanda","Mesa","Solicitado","A cobrar ahora","Acción"],rows,"Aún no hay comandas pendientes de cobro con productos entregados."));
+ }
  function paint(){
    if(!["admin","caja"].includes(S.user.role))return "";
    if(owner!==S.user.id||activeDay!==S.today){owner=S.user.id;activeDay=S.today;from=S.today;to=S.today}
@@ -80,7 +106,7 @@ function ventasPeriodo(orders,start,end){
    const records=r.entries.map(e=>[
       `<b>${h(e.code)}</b><small class="sub">${h(e.kind)+(e.method?" · "+h(e.method):"")}</small>`,
       h(e.at),`<b>${h(e.order)}</b><small class="sub">${h(displayDate(e.day))}</small>`,
-      h(e.mesa),h(e.who),money(e.amount)]);
+      h(e.mesa),h(e.who),money(e.amount),button("Ver detalle de comanda",()=>details(S.orders.find(o=>o.id===e.id),true),"link")+(e.kind==="Cobro"?voidButton(S.orders.find(o=>o.id===e.id)):"")]);
    const products=r.products.map(p=>[h(p.name),fmt(p.sold),fmt(p.returned),money(p.amount)]);
    const filters=`<form id="ventas-filtro" class="actions filters">${input("desde","Desde","date",from,"required")}${input("hasta","Hasta","date",to,"required")}<button class="btn primary">Consultar</button></form>`;
    const expenses=(S.cash_expenses||[]).filter(e=>e.day>=from&&e.day<=to);
@@ -97,11 +123,11 @@ function ventasPeriodo(orders,start,end){
    const expectedDay=S.today;
    const jornada=button("Cambiar jornada",()=>modal("Jornada de caja",input("day","Fecha de trabajo (vacía para usar la fecha actual)","date",S.today),
      async v=>{await run("gestion.cash_day",{...v,expected_day:expectedDay},"Jornada actualizada");from=S.today;to=S.today;render()}),"secondary");
-   return panel("Período de caja",filters,jornada)+`<div class="metrics">${metric("Ventas cobradas",r.count)}${metric("Cobros",money(r.gross))}${metric("Devoluciones",money(r.refunded))}${metric("Ingreso neto",money(r.net))}</div>`+
+   return collectionPanel()+panel("Período de caja",filters,jornada)+`<div class="metrics">${metric("Ventas cobradas",r.count)}${metric("Cobros",money(r.gross))}${metric("Devoluciones",money(r.refunded))}${metric("Anulaciones",money(r.voided))}${metric("Ingreso neto",money(r.net))}</div>`+
       (r.unlocated?`<p class="notice">El historial anterior contiene ${money(r.unlocated)} en devoluciones sin fecha registrada. El informe incluye los movimientos con fecha verificable.</p>`:"")+
       panel("Arqueo de caja",`<div class="metrics">${metric("Ventas netas",money(r.net))}${metric("Personal",money(spent("Personal")))}${metric("Mercado",money(spent("Mercado")))}${metric(result<0?"Pérdida":result>0?"Ganancia":"Resultado",money(result))}</div>`+table(["Medio de pago","Cobros"],methods.map(([m,v])=>[h(m),money(v)]),"Sin cobros"))+
       panel("Gastos de caja",table(["Fecha","Tipo","Referencia","Concepto","Importe","Responsable","Estado"],expenseRows,"Sin gastos"),button("Registrar gasto",addExpense,"primary"))+
-      panel("Movimientos de caja",table(["Documento","Fecha de operación","Comanda","Mesa o referencia","Responsable","Importe"],records,"Sin cobros ni devoluciones en este período."),
+      panel("Movimientos de caja",table(["Documento","Fecha de operación","Comanda","Mesa o referencia","Responsable","Importe","Acción"],records,"Sin cobros ni devoluciones en este período."),
             records.length?button("Descargar CSV",()=>downloadReport(r)):"")+
       panel("Ventas por producto",table(["Producto","Unidades cobradas","Devueltas","Importe neto"],products,"Sin productos en el período seleccionado."));
  }

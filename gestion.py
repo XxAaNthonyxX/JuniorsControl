@@ -5,6 +5,7 @@ Las cantidades se almacenan en milésimas y los importes en céntimos de sol.
 """
 
 from datetime import date, datetime, timedelta, timezone
+from collections import defaultdict
 from math import lcm
 import re
 
@@ -119,6 +120,8 @@ def _receive(db, user, p):
     r = _one(db, "SELECT * FROM g_receipts WHERE id=?", _int(p.get("id"), "recepción", 1))
     if r["approved_m"] is not None:
         raise ValueError("Esta recepción ya fue revisada.")
+    if "version" in p and _int(p["version"],"versión",1)!=r["version"]:
+        raise ValueError("La hoja de compra cambió. Actualiza la recepción antes de revisarla.")
     item = _item(db,r["item_id"])
     approved = inv.item_quantity(item["name"],p.get("approved"),"Cantidad aprobada",unit=item["unit"],item=item,
                                  minimum=0,previous=r["qty_m"])
@@ -136,27 +139,44 @@ def _receive(db, user, p):
         lot_id = inv.receive(db,user,r["item_id"],approved,p.get("expiry") or None,
                              "Recepción aprobada", f"RC{r['id']:04d}")
     at = stamp()
-    db.execute("""UPDATE g_receipts SET approved_m=?,received_m=?,reason=?,lot_id=?,reviewed_at=?,reviewer=? WHERE id=?""",
+    db.execute("""UPDATE g_receipts SET approved_m=?,received_m=?,reason=?,lot_id=?,reviewed_at=?,reviewer=?,
+                  version=version+1 WHERE id=?""",
                (approved, received, reason, lot_id, at, user["name"], r["id"]))
     if partial:
         db.execute("INSERT INTO g_incidents(receipt_id,created) VALUES(?,?)", (r["id"], at))
     if r["line_id"]:
         purchase = _one(db, "SELECT purchase_id FROM g_lines WHERE id=?", r["line_id"])[0]
-        pending = db.execute("""SELECT 1 FROM g_receipts r JOIN g_lines l ON r.line_id=l.id
-                               WHERE l.purchase_id=? AND r.approved_m IS NULL""", (purchase,)).fetchone()
-        if not pending:
-            db.execute("UPDATE g_purchases SET status='Recibida' WHERE id=?", (purchase,))
+        _sync_purchase_receipt_state(db,purchase)
     return r["id"]
 
 
+def _sync_purchase_receipt_state(db,purchase_id):
+    db.execute("""UPDATE g_purchases SET version=version+1,status=CASE WHEN EXISTS (
+                    SELECT 1 FROM g_receipts r JOIN g_lines l ON r.line_id=l.id
+                    WHERE l.purchase_id=g_purchases.id AND r.approved_m IS NULL
+                  ) THEN 'Enviada' ELSE 'Recibida' END WHERE id=?""",(purchase_id,))
+
+
 def _resolve(db, user, p):
-    _require(user, "admin")
+    _require(user, "admin","caja")
     issue = _one(db, "SELECT * FROM g_incidents WHERE id=?", _int(p.get("id"), "inconformidad", 1))
     if issue["closed"]:
         raise ValueError("La inconformidad ya está resuelta.")
-    resolution = _text(p.get("resolution"), "gestión con el proveedor", 500)
-    db.execute("UPDATE g_incidents SET resolution=?,closed=?,closer=? WHERE id=?",
-               (resolution, stamp(), user["name"], issue["id"]))
+    admit = _flag(p) if "approve" in p else True
+    resolution = _text(p.get("resolution"), "motivo de la decisión", 500)
+    at=stamp()
+    if not admit:
+        receipt=_one(db,"SELECT * FROM g_receipts WHERE id=?",issue["receipt_id"])
+        remaining=receipt["qty_m"]-receipt["approved_m"]
+        if remaining:
+            db.execute("""INSERT INTO g_receipts(item_id,line_id,supplier,qty_m,unit_cents,created,actor)
+                          VALUES(?,?,?,?,?,?,?)""",(receipt["item_id"],receipt["line_id"],receipt["supplier"],
+                          remaining,receipt["unit_cents"],at,user["name"]))
+            if receipt["line_id"]:
+                purchase=_one(db,"SELECT purchase_id FROM g_lines WHERE id=?",receipt["line_id"])[0]
+                _sync_purchase_receipt_state(db,purchase)
+    db.execute("UPDATE g_incidents SET decision=?,resolution=?,closed=?,closer=? WHERE id=?",
+               (admit,resolution,at,user["name"],issue["id"]))
     return issue["id"]
 
 
@@ -251,6 +271,14 @@ def _assignee(db, value):
     return _one(db,"SELECT id FROM users WHERE id=? AND active=1",
                 _int(value, "responsable", 1))[0]
 
+def _purchase_day(purchase):
+    return purchase["purchase_day"] or purchase["created"][:10]
+
+
+def _require_current_lot(day):
+    if day!=inv.today():
+        raise ValueError("El lote solo se puede modificar o enviar durante su día, hasta las 00:00 (Lima).")
+
 
 def _purchase(db, user, p):
     _require(user, "admin")
@@ -264,12 +292,11 @@ def _purchase(db, user, p):
                       _int(p["source_purchase_id"],"compra de origen",1))
         if source["status"] not in ("Enviada","Recibida"):
             raise ValueError("La hoja de origen debe estar cursada o recibida.")
-        day = source["purchase_day"] or source["created"][:10]
+        day = _purchase_day(source)
         origin = "Ampliación de " + inv.public("OC",source["id"])
     else:
         day = inv._date(p.get("purchase_day",created[:10]))
-        if day > created[:10]:
-            raise ValueError("Selecciona hoy o una fecha anterior para el lote de compra.")
+    _require_current_lot(day)
     cur = db.execute("""INSERT INTO g_purchases(origin,created,actor,supplier,assignee_id,status,purchase_day) OUTPUT INSERTED.id
                         VALUES(?,?,?,?,?,'Borrador',?)""",(origin,created,user["name"],supplier,delegate,day))
     _put_lines(db,cur.lastrowid,lines)
@@ -285,14 +312,18 @@ def _edit_purchase(db, user, p):
     purchase = _one(db,"SELECT * FROM g_purchases WHERE id=?",_int(p.get("id"), "compra", 1))
     if user["role"] != "admin" and purchase["assignee_id"] != user["id"]:
         raise PermissionError("Solo administración o el responsable delegado puede editar la compra.")
-    if purchase["status"] != "Borrador":
-        raise ValueError("Solo se pueden modificar compras en borrador.")
+    sent=purchase["status"] in ("Enviada","Recibida")
+    if not sent and purchase["status"]!="Borrador":
+        raise ValueError("Abre la hoja aprobada como borrador para corregirla.")
+    _require_current_lot(_purchase_day(purchase))
     _check_purchase_version(purchase,p)
     supplier = _text(p.get("supplier",purchase["supplier"]),"proveedor",100,optional=True)
     delegate = purchase["assignee_id"]
     if "assignee_id" in p and user["role"] == "admin":
         delegate = _assignee(db,p["assignee_id"])
-    if "lines" in p:
+    if sent:
+        _edit_sent_purchase(db,user,purchase,p,supplier)
+    elif "lines" in p:
         previous = dict(db.execute("SELECT item_id,qty_m FROM g_lines WHERE purchase_id=?",(purchase["id"],)))
         lines = _lines(db,p["lines"],previous)
         if user["role"] != "admin":
@@ -305,11 +336,65 @@ def _edit_purchase(db, user, p):
     return purchase["id"]
 
 
+def _edit_sent_purchase(db,user,purchase,p,supplier):
+    pid=purchase["id"]
+    existing={r["item_id"]:r for r in db.execute("SELECT * FROM g_lines WHERE purchase_id=?",(pid,))}
+    previous={item_id:r["qty_m"] for item_id,r in existing.items()}
+    lines=_lines(db,p["lines"],previous) if "lines" in p else [
+        (item_id,r["qty_m"],r["unit_cents"]) for item_id,r in existing.items()]
+    if not supplier or any(not cost for _,_,cost in lines):
+        raise ValueError("Indica el proveedor y cotiza todos los insumos de la lista enviada.")
+    if user["role"]!="admin" and any(item_id not in existing for item_id,_,_ in lines):
+        raise PermissionError("La delegación solo permite editar los insumos de la hoja asignada.")
+    receipts=defaultdict(list)
+    for receipt in db.execute("""SELECT r.*,i.decision FROM g_receipts r JOIN g_lines l ON l.id=r.line_id
+          LEFT JOIN g_incidents i ON i.receipt_id=r.id WHERE l.purchase_id=? ORDER BY r.id""",(pid,)):
+        receipts[receipt["item_id"]].append(receipt)
+    proposed={item_id:(qty,cost) for item_id,qty,cost in lines}
+    pending_lines=[]
+    old_cost=new_cost=0
+    for item_id in existing.keys()|proposed.keys():
+        old=existing.get(item_id)
+        qty,cost=proposed.get(item_id,(0,0))
+        reviewed=[r for r in receipts[item_id] if r["approved_m"] is not None]
+        pending=[r for r in receipts[item_id] if r["approved_m"] is None]
+        fixed=sum(r["approved_m"] if r["decision"]==0 else r["qty_m"] for r in reviewed)
+        if reviewed and (not qty or qty<fixed or cost!=old["unit_cents"] or supplier!=purchase["supplier"]):
+            raise ValueError("Conserva los insumos ya revisados, su cantidad tramitada, su costo y su proveedor.")
+        remaining=qty-fixed
+        committed=sum(_amount(r["qty_m"],r["unit_cents"]) for r in pending)
+        old_cost+=committed
+        new_cost+=committed if old and (qty,cost)==(old["qty_m"],old["unit_cents"]) else _amount(remaining,cost)
+        pending_lines.append((item_id,old,qty,cost,remaining,pending))
+    if new_cost>old_cost and new_cost-old_cost>budget(db)["available_cents"]:
+        raise ValueError("Saldo insuficiente para aumentar el importe pendiente de recepción.")
+    at=stamp()
+    for item_id,old,qty,cost,remaining,pending in pending_lines:
+        if old and (qty,cost)==(old["qty_m"],old["unit_cents"]) and supplier==purchase["supplier"]:
+            continue
+        for r in pending:
+            db.execute("DELETE FROM g_receipts WHERE id=?",(r["id"],))
+        if not qty:
+            db.execute("DELETE FROM g_lines WHERE id=?",(old["id"],))
+            continue
+        if old:
+            line_id=old["id"]
+            db.execute("UPDATE g_lines SET qty_m=?,unit_cents=? WHERE id=?",(qty,cost,line_id))
+        else:
+            line_id=db.execute("""INSERT INTO g_lines(purchase_id,item_id,qty_m,unit_cents) OUTPUT INSERTED.id
+                                  VALUES(?,?,?,?)""",(pid,item_id,qty,cost)).lastrowid
+        if remaining:
+            db.execute("""INSERT INTO g_receipts(item_id,line_id,supplier,qty_m,unit_cents,created,actor)
+                          VALUES(?,?,?,?,?,?,?)""",(item_id,line_id,supplier,remaining,cost,at,user["name"]))
+    _sync_purchase_receipt_state(db,pid)
+
+
 def _decide(db, user, p):
     _require(user,"admin")
     purchase = _one(db,"SELECT * FROM g_purchases WHERE id=?",_int(p.get("id"),"compra",1))
     if purchase["status"] != "Borrador":
         raise ValueError("La compra ya fue evaluada.")
+    _require_current_lot(_purchase_day(purchase))
     _check_purchase_version(purchase,p)
     approve = _flag(p)
     if approve:
@@ -317,7 +402,7 @@ def _decide(db, user, p):
             raise ValueError("Indica el proveedor antes de aprobar la compra.")
         if db.execute("SELECT 1 FROM g_lines WHERE purchase_id=? AND unit_cents=0",(purchase["id"],)).fetchone():
             raise ValueError("Completa la cotización de todos los insumos antes de aprobar.")
-    db.execute("UPDATE g_purchases SET status=?,reviewed_at=?,reviewer=? WHERE id=?",
+    db.execute("UPDATE g_purchases SET status=?,reviewed_at=?,reviewer=?,version=version+1 WHERE id=?",
                ("Aprobada" if approve else "Rechazada",stamp(),user["name"],purchase["id"]))
     return purchase["id"]
 
@@ -327,6 +412,7 @@ def _reopen_purchase(db, user, p):
     purchase = _one(db,"SELECT * FROM g_purchases WHERE id=?",_int(p.get("id"),"compra",1))
     if purchase["status"] != "Aprobada":
         raise ValueError("Solo se puede revisar una compra aprobada que todavía no se ha cursado.")
+    _require_current_lot(_purchase_day(purchase))
     _check_purchase_version(purchase,p)
     db.execute("""UPDATE g_purchases SET status='Borrador',version=version+1,
                   reviewed_at=NULL,reviewer=NULL WHERE id=?""",(purchase["id"],))
@@ -339,7 +425,15 @@ def _dispatch(db, user, p):
     if purchase["status"] != "Aprobada":
         raise ValueError("Solo se puede cursar una compra aprobada y pendiente de envío.")
     _check_purchase_version(purchase,p)
+    _require_current_lot(_purchase_day(purchase))
+    _dispatch_purchase(db,user,purchase)
+    return purchase["id"]
+
+
+def _dispatch_purchase(db,user,purchase):
     lines = list(db.execute("SELECT * FROM g_lines WHERE purchase_id=?",(purchase["id"],)))
+    if not purchase["supplier"] or not lines or any(not r["unit_cents"] for r in lines):
+        raise ValueError(f"Completa el proveedor y la cotización en {inv.public('OC',purchase['id'])}.")
     cost = sum(_amount(r["qty_m"],r["unit_cents"]) for r in lines)
     if cost > budget(db)["available_cents"]:
         raise ValueError("Saldo insuficiente para cursar esta compra. Revisa el presupuesto disponible.")
@@ -347,9 +441,26 @@ def _dispatch(db, user, p):
     db.executemany("""INSERT INTO g_receipts(item_id,line_id,supplier,qty_m,unit_cents,created,actor)
                       VALUES(?,?,?,?,?,?,?)""",
                    ((r["item_id"],r["id"],purchase["supplier"],r["qty_m"],r["unit_cents"],at,user["name"]) for r in lines))
-    db.execute("UPDATE g_purchases SET status='Enviada',sent_at=?,sender=? WHERE id=?",
-               (at,user["name"],purchase["id"]))
-    return purchase["id"]
+    db.execute("""UPDATE g_purchases SET status='Enviada',sent_at=?,sender=?,version=version+1,
+                  reviewed_at=COALESCE(reviewed_at,?),reviewer=COALESCE(reviewer,?) WHERE id=?""",
+               (at,user["name"],at,user["name"],purchase["id"]))
+
+
+def _send_purchase_list(db,user,p):
+    _require(user,"admin")
+    day=inv._date(p.get("day"))
+    _require_current_lot(day)
+    expected=p.get("orders")
+    if not isinstance(expected,list) or not expected or any(not isinstance(r,dict) for r in expected):
+        raise ValueError("Selecciona un lote con hojas de compra pendientes de envío.")
+    versions={_int(r.get("id"),"compra",1):_int(r.get("version"),"versión",1) for r in expected}
+    purchases=list(db.execute("""SELECT * FROM g_purchases
+                WHERE COALESCE(purchase_day,LEFT(created,10))=? AND status IN ('Borrador','Aprobada') ORDER BY id""",(day,)))
+    if versions!={r["id"]:r["version"] for r in purchases}:
+        raise ValueError("La lista del día cambió. Actualiza antes de enviarla.")
+    for purchase in purchases:
+        _dispatch_purchase(db,user,purchase)
+    return {"day":day,"sent":len(purchases)}
 
 
 def _configure(db, user, p, *, funds):
@@ -462,6 +573,8 @@ def tick(db):
 
 
 def act(db, user, action, payload):
+    if action=="gestion.send_purchase_list":
+        return _send_purchase_list(db,user,payload)
     handlers = {
         "gestion.configure_alerts":_configure_alerts,
         "gestion.receipt":_receipt, "gestion.receive":_receive, "gestion.resolve":_resolve,
@@ -526,7 +639,7 @@ def _with_code(row, prefix):
 
 def state(db, user):
     admin = user["role"] == "admin"
-    receiving = user["role"] in {"admin","recepcion"}
+    receiving = user["role"] in {"admin","recepcion","caja"}
     result = {"receipts":[], "wastes":[], "incidents":[], "alerts":[], "purchases":[],
               "reports":[], "budget":None, "schedule":None}
     if user["role"] in ("admin","caja"):
@@ -539,7 +652,7 @@ def state(db, user):
         result["cash_expenses"]=[dict(r) for r in db.execute("SELECT * FROM cash_expenses ORDER BY day DESC,id DESC")]
     if receiving:
         for r in db.execute("""SELECT r.id,r.item_id,i.code item_code,i.name item_name,i.unit,i.display_unit,i.display_unit_milli,i.area,i.perishable,r.supplier,r.qty_m,
-                r.approved_m,r.received_m,r.reason,r.created,r.actor,r.reviewed_at,r.reviewer,r.unit_cents,
+                r.approved_m,r.received_m,r.reason,r.created,r.actor,r.reviewed_at,r.reviewer,r.unit_cents,r.version,
                 r.lot_id,l.expiry,k.purchase_id,COALESCE(p.purchase_day,LEFT(p.created,10)) purchase_day
                 FROM g_receipts r JOIN inv_items i ON i.id=r.item_id
                 LEFT JOIN g_lines k ON k.id=r.line_id LEFT JOIN inv_lots l ON l.id=r.lot_id
@@ -556,10 +669,12 @@ def state(db, user):
             if not admin:
                 receipt.pop("unit_cents")
             result["receipts"].append(receipt)
-        for r in db.execute("""SELECT p.id,p.receipt_id,r.item_id,k.purchase_id,i.name item_name,i.unit,i.display_unit,i.display_unit_milli,r.supplier,
+        for r in db.execute("""SELECT p.id,p.receipt_id,r.item_id,k.purchase_id,COALESCE(c.purchase_day,LEFT(c.created,10)) purchase_day,
+                i.name item_name,i.unit,i.display_unit,i.display_unit_milli,r.supplier,
                 r.qty_m,r.received_m,r.approved_m,r.reason,p.created,r.reviewer AS actor,
-                p.resolution,p.closed,p.closer FROM g_incidents p JOIN g_receipts r ON r.id=p.receipt_id
+                p.resolution,p.closed,p.closer,p.decision FROM g_incidents p JOIN g_receipts r ON r.id=p.receipt_id
                 JOIN inv_items i ON i.id=r.item_id LEFT JOIN g_lines k ON k.id=r.line_id
+                LEFT JOIN g_purchases c ON c.id=k.purchase_id
                 ORDER BY CASE WHEN p.closed IS NULL THEN 0 ELSE 1 END,p.id DESC"""):
             issue = _with_code(r,"INC")
             expected,received,approved = issue.pop("qty_m"),issue.pop("received_m"),issue.pop("approved_m")
@@ -567,7 +682,8 @@ def state(db, user):
             issue["rejected"] = None if received is None else inv.num(received-approved)
             issue["kind"] = "Rechazo" if (received or 0) > approved or (received is None and approved == 0) else "Faltante"
             issue["qty"] = inv.num(max(expected,received or 0)-approved)
-            issue["status"] = "Resuelta" if issue["closed"] else "Abierta"
+            issue["status"] = ("Admitida" if issue["decision"] else "Denegada" if issue["decision"]==0
+                               else "Resuelta" if issue["closed"] else "Pendiente")
             result["incidents"].append(issue)
     if user["role"] in {"admin","recepcion","area"}:
         for r in db.execute("""SELECT w.*,i.name item_name,i.unit,i.display_unit,i.display_unit_milli,i.area FROM g_wastes w

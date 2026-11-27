@@ -69,6 +69,10 @@ def copy_tables(source, destination):
             expected.discard("work_day")
         if name=="g_purchases":
             expected.discard("purchase_day")
+        if name=="g_receipts":
+            expected.discard("version")
+        if name=="g_incidents":
+            expected.discard("decision")
         if name=="inv_items":
             expected -= {"display_unit","display_unit_milli"}
         if name == "users":

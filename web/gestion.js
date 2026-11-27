@@ -20,7 +20,10 @@
   const note = value => '<p class="muted">'+e(value)+'</p>';
   const metric = (name,value) => '<div class="metric"><span class="muted">'+e(name)+'</span><div class="value">'+e(value)+'</div></div>';
   const group = (...metrics) => '<div class="metrics">'+metrics.join("")+'</div>';
-  let preferredReceipt=null;
+  const canReceive=()=>["admin","recepcion"].includes(S.user.role);
+  const canDecideReceipt=()=>["admin","caja"].includes(S.user.role);
+  const purchaseLotCode=day=>"LC-"+day.replaceAll("-","");
+  let receiptLot="";
 
   function confirmAction(title, text, action, payload, submit, message) {
     modal(title,note(text),()=>run("gestion."+action,payload,message),submit);
@@ -69,8 +72,8 @@
       input("reason",approve?"Motivo si hay faltantes o unidades rechazadas":"Motivo del rechazo","text","",
         approve?"maxlength=500":"required maxlength=500")+
       note(approve?"Solo la cantidad aprobada ingresará al stock. Las diferencias quedarán como solicitudes pendientes.":
-        "La solicitud quedará pendiente para que Administración gestione el rechazo con el proveedor."),
-      v=>run("gestion.receive",{id:r.id,received:stockQuantityPayload(r.item_name,r.unit,v.received,r,r.qty),
+        "Caja o Administración revisará el motivo de rechazo."),
+      v=>run("gestion.receive",{id:r.id,version:r.version,received:stockQuantityPayload(r.item_name,r.unit,v.received,r,r.qty),
         approved:stockQuantityPayload(r.item_name,r.unit,approve?v.approved:"0",r,r.qty),expiry:v.expiry,reason:v.reason},
         approve?"Recepción aprobada · stock actualizado":"Solicitud de rechazo registrada"),verb);
     dialog.querySelector("form").addEventListener("input",event=>{
@@ -81,19 +84,21 @@
     });
   }
 
-  function resolveIncident(x) {
-    modal("Resolver "+x.code,note(x.supplier+" · "+x.item_name+" · "+qtyText(x,x.qty)+". "+x.reason)+
-      input("resolution","Gestión con el proveedor","text","","required maxlength=500"),
-      v=>run("gestion.resolve",{id:x.id,resolution:v.resolution},"Inconformidad resuelta"),"Resolver");
+  function resolveIncident(x,approve) {
+    const verb=approve?"Admitir rechazo":"Denegar rechazo";
+    modal(verb+" · "+x.code,note(x.supplier+" · "+x.item_name+" · "+qtyText(x,x.qty)+". "+x.reason)+
+      note(approve?"Se cerrará la solicitud.":"La cantidad pendiente volverá a revisión de Recepción.")+
+      input("resolution","Motivo de la decisión","text","","required maxlength=500"),
+      v=>run("gestion.resolve",{id:x.id,approve,resolution:v.resolution},approve?"Rechazo admitido":"Rechazo denegado"),verb);
   }
 
   function receiptTable(deliveries) {
     return table(["Producto","Cantidad prevista","Revisión","Acciones"],deliveries.map(r=>[
-      `<strong>${e(r.item_name)}</strong>`+sub([r.item_code,r.area,r.code,r.purchase_id?null:r.supplier].filter(Boolean).join(" · ")),
+      `<strong>${e(r.item_name)}</strong>`+sub([r.item_code,r.area,r.code,r.purchase_id?label("OC",r.purchase_id):null,r.supplier].filter(Boolean).join(" · ")),
       e(qtyText(r,r.qty)),
       badge(r.status)+(r.approved!==null?sub((r.received!=null?qtyText(r,r.received)+" entregados · ":"")+
         qtyText(r,r.approved)+" aprobados")+sub(when(r.reviewed_at)+" · "+r.reviewer):""),
-      r.status==="Pendiente"?actions(
+      r.status==="Pendiente"&&canReceive()?actions(
         button("Aprobar recepción",()=>reviewReceipt(r,true),"primary"),
         button("Solicitar rechazo",()=>reviewReceipt(r,false))
       ):(r.lot_id?muted(label("LT",r.lot_id)+(r.expiry?" · Vence "+date(r.expiry):"")):""),
@@ -103,39 +108,40 @@
   function receiptGroups(deliveries) {
     const groups=new Map();
     for(const receipt of deliveries){
-      const id=receipt.purchase_id??null;
+      const id=receipt.purchase_day||"manual";
       if(!groups.has(id))groups.set(id,[]);
       groups.get(id).push(receipt);
     }
-    const order=[...groups.keys()];
-    if(preferredReceipt!=null&&groups.has(preferredReceipt)){
-      order.splice(order.indexOf(preferredReceipt),1);
-      order.unshift(preferredReceipt);
-    }
+    const order=[...groups.keys()].sort().reverse();
     return order.map(id=>{
       const list=groups.get(id);
-      const first=list[0];
       const done=list.filter(r=>r.status!=="Pendiente").length;
-      const title=id?`Orden ${label("OC",id)} · ${first.supplier}`:"Entregas manuales";
-      const subtitle=id?`Lote del ${date(first.purchase_day)} · ${done} de ${list.length} productos revisados`:
-        `${done} de ${list.length} productos revisados`;
+      const title=id==="manual"?"Entregas manuales":`${purchaseLotCode(id)} · ${date(id)}`;
+      const subtitle=`${done} de ${list.length} renglones revisados`;
       return `<section><h3>${e(title)}</h3>${note(subtitle)}${receiptTable(list)}</section>`;
     }).join("");
   }
 
   pages.recepcion = () => {
-    const deliveries = rows("receipts");
-    const issues = rows("incidents");
+    const all=rows("receipts");
+    const days=[...new Set(all.map(r=>r.purchase_day).filter(Boolean))].sort().reverse();
+    const options=[["","Todos los lotes"],...days.map(d=>[d,purchaseLotCode(d)+" · "+date(d)])];
+    if(all.some(r=>!r.purchase_day))options.push(["manual","Entregas manuales"]);
+    if(!options.some(([id])=>id===receiptLot))receiptLot="";
+    const matches=r=>!receiptLot||(r.purchase_day||"manual")===receiptLot;
+    const deliveries=all.filter(matches);
+    const issues=rows("incidents").filter(matches);
     return stack(group(metric("Pendientes de revisión",deliveries.filter(x=>x.status==="Pendiente").length),
       metric("Solicitudes pendientes",issues.filter(x=>!x.closed).length)),
-      panel("Entregas de proveedores",deliveries.length?stack(receiptGroups(deliveries)):receiptTable([]),
-        button("Registrar entrega",newReceipt,"primary")),
+      panel("Entregas de proveedores",stack('<div class="actions">'+select("receipt_lot","Buscar por lote",options,receiptLot)+'</div>',
+        deliveries.length?receiptGroups(deliveries):receiptTable([])),
+        canReceive()?button("Registrar entrega",newReceipt,"primary"):""),
       panel("Solicitudes de rechazo y diferencias",table(["Solicitud","Insumo y proveedor","Diferencia","Motivo y seguimiento","Estado"],issues.map(x=>[
         e(x.code)+sub(x.kind)+sub([x.purchase_id?label("OC",x.purchase_id):"",label("RC",x.receipt_id)].filter(Boolean).join(" · "))+
         sub(when(x.created)+" · "+x.actor),e(x.item_name)+sub(x.supplier),e(qtyText(x,x.qty))+
         (x.missing!=null?sub(qtyText(x,x.missing)+" faltantes · "+qtyText(x,x.rejected)+" rechazados"):""),e(x.reason)+
         (x.resolution?sub(x.resolution)+sub(when(x.closed)+" · "+x.closer):""),
-        actions(badge(x.closed?"Resuelta":"Pendiente"),admin()&&!x.closed?button("Resolver solicitud",()=>resolveIncident(x)):"")
+        actions(badge(x.status),canDecideReceipt()&&!x.closed?button("Admitir",()=>resolveIncident(x,true),"primary"):"",canDecideReceipt()&&!x.closed?button("Denegar",()=>resolveIncident(x,false)):"")
       ]),"Aún no se han registrado diferencias de recepción.")));
   };
 
@@ -206,7 +212,6 @@
   };
 
   const purchaseDayOf = purchase => purchase.purchase_day || purchase.created.slice(0,10);
-  const purchaseLotCode = day => "LC-"+day.replaceAll("-","");
   let selectedPurchaseDay="";
 
   function purchaseForm(p, {day=S.calendar_today||S.today, source=null}={}) {
@@ -233,6 +238,7 @@
     const lotDay=p?purchaseDayOf(p):source?purchaseDayOf(source):day;
     const dialog=modal(p?"Editar "+p.code:source?"Ampliar "+source.code:"Nueva hoja de compra",
       note(`Lote ${purchaseLotCode(lotDay)} · ${date(lotDay)}`)+
+      (p&&p.sent_at?note("Los cambios se aplican a Recepción. Conserva las cantidades ya tramitadas y sus costos."):"")+
       input("supplier","Proveedor","text",p?.supplier||source?.supplier||"","maxlength=100")+assigned+
       '<div class="full">'+note("Completa la cantidad y el costo unitario de los insumos que deseas comprar.")+lines+'</div>',
       v=>{
@@ -312,15 +318,29 @@
       note(`Se comprometerán ${money(purchase.total_cents)}. En Recepción aparecerá una fila por insumo de ${purchase.supplier}.`),
       async ()=>{
         await run("gestion.dispatch",{id:purchase.id,version:purchase.version},"Compra confirmada · recepción pendiente");
-        preferredReceipt=purchase.id;
+        receiptLot=purchaseDayOf(purchase);
         go("recepcion");
       },"Confirmar compra");
+  }
+
+  function sendPurchaseList(day,purchases) {
+    const list=table(["Orden","Proveedor","Insumos","Total"],purchases.map(p=>[
+      e(p.code),e(p.supplier||"Por definir"),e(p.lines.length),e(money(p.total_cents))
+    ]));
+    modal("Enviar lista de pedidos · "+purchaseLotCode(day),list+
+      note("Confirma el envío del lote a Recepción. Puedes editarlo hasta las 00:00 de Lima."),
+      async()=>{
+        await run("gestion.send_purchase_list",{day,orders:purchases.map(({id,version})=>({id,version}))},"Lista de pedidos enviada");
+        receiptLot=day;
+        go("recepcion");
+      },"Enviar lista de pedidos");
   }
 
   function purchaseActions(p) {
     const draft=p.status==="Borrador";
     const info=button("Detalle",()=>purchaseDetails(p));
-    const edit=draft?button("Editar",()=>purchaseForm(p)):"";
+    if(purchaseDayOf(p)!==(S.calendar_today||S.today))return info;
+    const edit=draft||p.status==="Enviada"||p.status==="Recibida"?button("Editar",()=>purchaseForm(p)):"";
     const approval=approve=>confirmAction((approve?"Aprobar ":"Rechazar ")+p.code,
       (p.supplier||"Compra")+" · "+money(p.total_cents),"decide",{id:p.id,version:p.version,approve},
       approve?"Aprobar":"Rechazar","Compra evaluada");
@@ -332,7 +352,7 @@
       button("Confirmar compra",()=>confirmPurchase(p),"primary"));
     const supplement=["Enviada","Recibida"].includes(p.status)?
       button("Agregar insumos",()=>purchaseForm(null,{source:p})):"";
-    return actions(info,supplement);
+    return actions(info,edit,supplement);
   }
 
   function budgetCard(b) {
@@ -360,14 +380,16 @@
     const days=[...new Set([today,...purchases.map(purchaseDayOf)])].sort().reverse();
     const day=days.includes(selectedPurchaseDay)?selectedPurchaseDay:today;
     const lot=purchases.filter(p=>purchaseDayOf(p)===day);
+    const pending=lot.filter(p=>["Borrador","Aprobada"].includes(p.status));
     const period=`<div class="actions filters">${select("purchase_day","Lote diario",days.map(d=>[
       d,date(d)+" · "+purchaseLotCode(d),
-    ]),day)}${lot.length?button("Exportar lote en PDF",()=>printPurchases(day,lot)):""}</div>`;
+    ]),day)}${lot.length?button("Exportar lote en PDF",()=>printPurchases(day,lot)):""}
+      ${admin()&&day===today&&pending.length?button("Enviar lista de pedidos",()=>sendPurchaseList(day,pending),"primary"):""}</div>`;
     const procurement=panel(admin()?"Hojas de compra":"Hojas de compra delegadas",
       period+table(["Orden","Proveedor","Responsable","Total","Estado",""],lot.map(p=>[
         e(p.code)+sub(when(p.created)),e(p.supplier||"Por definir")+sub(p.origin),e(p.assignee||"Administración"),
         e(money(p.total_cents)),badge(p.status),purchaseActions(p)
-      ]),"Este lote todavía no tiene hojas de compra."),admin()?button("Nueva compra",()=>purchaseForm(null,{day}),"primary"):"");
+      ]),"Este lote todavía no tiene hojas de compra."),admin()&&day===today?button("Nueva compra",()=>purchaseForm(null,{day}),"primary"):"");
     if (!admin()) return procurement;
     const reports=panel("Informes de faltantes",
       '<p class="muted">Conteo diario a las '+e(S.schedule)+' (Lima), mientras la aplicación esté en ejecución.</p>'+
@@ -384,6 +406,11 @@
     return stack(budgetCard(S.budget),procurement,reports);
   };
   document.addEventListener("change",event=>{
+    if(route==="recepcion"&&event.target.name==="receipt_lot"){
+      receiptLot=event.target.value;
+      render();
+      document.querySelector('#view [name="receipt_lot"]')?.focus();
+    }
     if(route==="compras"&&event.target.name==="purchase_day"){
       selectedPurchaseDay=event.target.value===(S.calendar_today||S.today)?"":event.target.value;
       render();

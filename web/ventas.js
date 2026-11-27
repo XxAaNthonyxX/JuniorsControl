@@ -82,15 +82,9 @@ function ventasPeriodo(orders,start,end){
    return panel("Jornada activa · "+displayDate(S.today),table(["Fecha","Estado","Comandas","Registrada por","Fecha de registro","Acciones"],rows),
      button("Abrir fecha",()=>openDay(),"primary"));
  };
- function voidButton(o){
-   if(!o||o.sale_void||!o.details.some(d=>d.status==="Entregado"))return "";
-   return button("Anular venta",()=>{
-     const day=S.today;
-     const message=o.paid_at?"Se revertirá en caja el importe pendiente de devolución: "+cash(o.total)+".":
-       "Se cerrará la comanda, se cancelarán los productos pendientes y se registrará el consumo de los entregados.";
-     modal("Anular venta · "+o.code,`<p>${h(message)}</p>`+input("reason","Motivo","text","","required maxlength=300"),
-       v=>run("pedidos.void_sale",{id:o.id,version:o.version,expected_day:day,reason:v.reason},"Venta anulada"),"Confirmar anulación");
-   },"secondary");
+ function refundButton(o){
+   return o?.status==="Cobrado"&&o.details.some(d=>d.refundable_qty>0)?
+     button("Gestionar devolución",()=>refundOrder(o),"secondary"):"";
  }
  function collectionPanel(){
    const orders=S.orders.filter(o=>o.day===S.today&&["Reservado","Por revisar"].includes(o.status)&&!o.cancel_request&&o.details.some(d=>d.status==="Entregado"));
@@ -98,7 +92,7 @@ function ventasPeriodo(orders,start,end){
      const delivered=o.details.filter(d=>d.status==="Entregado");
      const cents=delivered.reduce((total,d)=>total+Math.round(d.price*100)*d.qty,0);
      return [h(o.code),h(o.table_name),cash(o.total),money(cents),
-       button("Cobrar",()=>chargeOrder(o),"primary")+voidButton(o)];
+       button("Cobrar",()=>chargeOrder(o),"primary")+button("Solicitar anulación",()=>requestCancel(o),"secondary")];
    });
    return panel("Comandas con entregas",table(["Comanda","Mesa","Solicitado","A cobrar ahora","Acción"],rows,"Aún no hay comandas pendientes de cobro con productos entregados."));
  }
@@ -110,7 +104,7 @@ function ventasPeriodo(orders,start,end){
    const records=r.entries.map(e=>[
       `<b>${h(e.code)}</b><small class="sub">${h(e.kind)}</small>${e.payments?.length?`<small class="sub">${h(formatPayments(e.payments))}</small>`:""}`,
       h(e.at),`<b>${h(e.order)}</b><small class="sub">${h(displayDate(e.day))}</small>`,
-      h(e.mesa),h(e.who),money(e.amount),button("Ver detalle de comanda",()=>details(S.orders.find(o=>o.id===e.id),true),"link")+(e.kind==="Cobro"?voidButton(S.orders.find(o=>o.id===e.id)):"")]);
+      h(e.mesa),h(e.who),money(e.amount),button("Ver detalle de comanda",()=>details(S.orders.find(o=>o.id===e.id),true),"link")+(e.kind==="Cobro"?refundButton(S.orders.find(o=>o.id===e.id)):"")]);
    const products=r.products.map(p=>[h(p.name),fmt(p.sold),fmt(p.returned),money(p.amount)]);
    const filters=`<form id="ventas-filtro" class="actions filters">${input("desde","Desde","date",from,"required")}${input("hasta","Hasta","date",to,"required")}<button class="btn primary">Consultar</button></form>`;
    const expenses=(S.cash_expenses||[]).filter(e=>e.day>=from&&e.day<=to);

@@ -559,13 +559,17 @@ def _validate_details(rows,existing):
             raise ValueError("Número de detalle repetido.")
         seen.add(number)
         prior=existing.get(number)
+        if prior and (prior["status"]=="Cancelado" or prior["remove_pending"]):
+            raise ValueError("Añade un detalle nuevo para reemplazar uno retirado.")
         if prior and prior["status"]=="Entregado" and (prior["product_id"],prior["qty"])!=(_id(line["product_id"]),int(line["qty"])):
             raise ValueError("Un detalle entregado no se puede modificar.")
-    if existing.keys()-seen:
-        raise ValueError("Cada detalle debe conservar un producto. Usa Cambiar producto.")
+    removed=[detail for number,detail in existing.items() if number not in seen and detail["status"]!="Cancelado"]
+    if any(detail["status"]=="Entregado" for detail in removed):
+        raise ValueError("Un detalle entregado no se puede eliminar.")
+    return removed
 
 
-def _reserved_quantities(rows,existing):
+def _reserved_quantities(rows,existing,removed):
     totals=defaultdict(int)
     for line in rows:
         prior=existing.get(line["detail_no"])
@@ -573,7 +577,19 @@ def _reserved_quantities(rows,existing):
             totals[prior["sent_product"]]+=prior["sent_qty"]
         else:
             totals[_id(line["product_id"])]+=int(line["qty"])
+    # El área conserva el envío y sus insumos hasta que Atención confirme el retiro.
+    for detail in removed:
+        if detail["sent_at"]:
+            totals[detail["sent_product"]]+=detail["sent_qty"]
     return totals
+
+
+def _retire_detail(db,order,number):
+    db.execute("""UPDATE d SET status='Cancelado',remove_pending=0,revision=revision+1,
+                  closed_name=COALESCE(l.name,p.name),closed_price=COALESCE(l.price,p.price)
+                  FROM inv_details d JOIN inv_products p ON p.id=d.product_id
+                  LEFT JOIN inv_lines l ON l.order_id=d.order_id AND l.product_id=d.product_id
+                  WHERE d.order_id=? AND d.detail_no=?""",(order,number))
 
 
 def _reserve_lines(db,order,requested,old_lines,status):
@@ -613,7 +629,7 @@ def _save_order(db,user,p,*,exchange=False):
     number_table = None if exchange else _table_number(p.get("table_number", p.get("table_name")))
     table = _text(p.get("table_name"), "mesa o referencia", 60) if exchange else f"Mesa {number_table}"
     rows = p.get("lines")
-    if not isinstance(rows,list) or not rows:
+    if not isinstance(rows,list) or (not rows and (not p.get("id") or exchange)):
         raise ValueError("Selecciona al menos un producto.")
     requested={}
     for line in rows:
@@ -654,9 +670,21 @@ def _save_order(db,user,p,*,exchange=False):
         active=[d for d in details.values() if d["status"]!="Cancelado"]
         if take_away!=o["take_away"] and active and all(d["status"]=="Entregado" for d in active):
             raise ValueError("El pedido ya fue entregado. La modalidad de consumo está bloqueada.")
-        _validate_details(rows,details)
-        requested=_reserved_quantities(rows,details)
-        db.execute("UPDATE inv_orders SET table_name=?,table_number=?,take_away=?,status='Reservado',version=version+1 WHERE id=?",(table,number_table,take_away,order))
+        removed=_validate_details(rows,details)
+        if not rows and not _dispatch_exists(db,order):
+            raise ValueError("Usa Anular comanda para cerrar un pedido que aún no se envió.")
+        requested=_reserved_quantities(rows,details,removed)
+        for detail in removed:
+            number=detail["detail_no"]
+            if detail["remove_pending"]:
+                continue
+            if detail["sent_at"]:
+                db.execute("""UPDATE inv_details SET remove_pending=1,product_id=sent_product,qty=sent_qty
+                              WHERE order_id=? AND detail_no=?""",(order,number))
+            else:
+                _retire_detail(db,order,number)
+        db.execute("UPDATE inv_orders SET table_name=?,table_number=?,take_away=?,status=?,version=version+1 WHERE id=?",
+                   (table,number_table,take_away,"Reservado" if requested else "Cancelado",order))
     else:
         timestamp=now()
         day=business_day(db)
@@ -686,7 +714,7 @@ def _close_details(db,order):
                   WHERE order_id=? AND status='Entregado' GROUP BY sent_product""",(order,))}
     if not delivered:
         raise ValueError("Debe haber productos entregados antes de cerrar la venta.")
-    db.execute("""UPDATE d SET closed_name=COALESCE(l.name,p.name),closed_price=COALESCE(l.price,p.price),
+    db.execute("""UPDATE d SET closed_name=COALESCE(d.closed_name,l.name,p.name),closed_price=COALESCE(d.closed_price,l.price,p.price),remove_pending=0,
                   status=CASE WHEN d.status='Entregado' THEN d.status ELSE 'Cancelado' END
                   FROM inv_details d JOIN inv_products p ON p.id=d.product_id
                   LEFT JOIN inv_lines l ON l.order_id=d.order_id AND l.product_id=d.product_id WHERE d.order_id=?""",(order,))
@@ -773,17 +801,11 @@ def _void_sale(db,user,p):
         raise ValueError("Cambió la jornada de caja. Actualiza antes de anular.")
     reason=_text(p.get("reason"),"motivo de anulación",300)
     oid=o["id"]
-    delivered=_close_details(db,oid) if not o["paid_at"] else None
-    if o["paid_at"] and not db.execute("SELECT 1 FROM inv_details WHERE order_id=? AND status='Entregado'",(oid,)).fetchone():
+    if not o["paid_at"]:
+        raise ValueError("Gestiona la anulación de una comanda abierta mediante una solicitud.")
+    if not db.execute("SELECT 1 FROM inv_details WHERE order_id=? AND status='Entregado'",(oid,)).fetchone():
         raise ValueError("Se requiere al menos un producto entregado para anular la venta.")
-    cents=0
-    if o["paid_at"]:
-        cents=db.execute("SELECT SUM(price*(qty-refunded)) FROM inv_lines WHERE order_id=?",(oid,)).fetchone()[0]
-    else:
-        _release(db,oid)
-        for pid,units in delivered.items():
-            for item,amount in db.execute("SELECT item_id,amount FROM inv_line_recipes WHERE order_id=? AND product_id=?",(oid,pid)):
-                withdraw(db,user,item,amount*units,"Entrega en venta anulada",_order_ref(o))
+    cents=db.execute("SELECT SUM(price*(qty-refunded)) FROM inv_lines WHERE order_id=?",(oid,)).fetchone()[0]
     at=now()
     db.execute("INSERT sale_voids(order_id,cash_day,at,actor,reason,cents) VALUES(?,?,?,?,?,?)",
                (oid,day,at,user["name"],reason,cents))
@@ -795,21 +817,45 @@ def _void_sale(db,user,p):
 
 
 def _cancel(db,user,p):
-    _role(user,"caja","admin")
+    _role(user,"caja","admin","atencion")
     o=_get_order(db,p)
     if _pending_cancel(db,o["id"]):
         raise ValueError("La cancelación pendiente debe aprobarse o rechazarse primero.")
-    if db.execute("SELECT 1 FROM inv_details WHERE sent_at IS NOT NULL AND order_id=? AND status=N'Entregado'",(o["id"],)).fetchone():
-        raise ValueError("La comanda tiene productos entregados. Solicita una devolución o ajuste supervisado.")
     if o["status"]=="Cancelado":
         return {"id":o["id"]}
     if o["status"] not in ("Por revisar","Reservado"):
         raise ValueError("Para corregir una venta cobrada, registra una devolución.")
     _check_version(o,p)
+    if _dispatch_exists(db,o["id"]):
+        raise ValueError("La comanda ya se envió a preparación. Gestiona la anulación por el flujo correspondiente.")
     _release(db,o["id"])
+    db.execute("""UPDATE inv_details SET status='Cancelado',remove_pending=0,revision=revision+1
+                  WHERE order_id=? AND ISNULL(status,'')<>'Cancelado'""",(o["id"],))
     db.execute("UPDATE inv_orders SET status='Cancelado',version=version+1 WHERE id=?",(o["id"],))
     _event(db,user,o["id"],"Cancelado")
     return {"id":o["id"]}
+
+
+def _returned_detail_totals(db,order_id=None):
+    query="""SELECT d.order_id,d.detail_no,SUM(d.qty) FROM inv_return_details d
+             LEFT JOIN refund_reversals r ON r.return_id=d.return_id WHERE r.return_id IS NULL"""
+    args=()
+    if order_id is not None:
+        query+=" AND d.order_id=?"
+        args=(order_id,)
+    return {(oid,number):qty for oid,number,qty in db.execute(query+" GROUP BY d.order_id,d.detail_no",args)}
+
+
+def _detail_refundable(details,returned,refunded):
+    available={}
+    legacy=refunded-sum(returned.get(d["detail_no"],0) for d in details)
+    for d in sorted(details,key=lambda d:d["detail_no"]):
+        number=d["detail_no"]
+        remaining=d["qty"]-returned.get(number,0)
+        already_returned=min(remaining,legacy)
+        available[number]=remaining-already_returned
+        legacy-=already_returned
+    return available
 
 
 def _refund(db,user,p,*,resolving=0):
@@ -819,7 +865,7 @@ def _refund(db,user,p,*,resolving=0):
         raise ValueError("Selecciona una venta cobrada con unidades pendientes de devolución.")
     _check_version(o,p)
     pid=_id(p.get("product_id"))
-    n=_scaled(p.get("qty"),1,"Unidades a devolver",high=10000)
+    n=_scaled(p.get("qty"),1,"Unidades a devolver",high=1_000_000_000 if p.get("details") is not None else 10000)
     reason=_text(p.get("reason"),"motivo",300)
     line=db.execute("SELECT * FROM inv_lines WHERE order_id=? AND product_id=?",(o["id"],pid)).fetchone()
     if not line or n>line["qty"]-line["refunded"]:
@@ -828,6 +874,27 @@ def _refund(db,user,p,*,resolving=0):
                        WHERE order_id=? AND product_id=? AND status='Pendiente' AND id<>?""",(o["id"],pid,resolving)).fetchone()[0]
     if n>line["qty"]-line["refunded"]-held:
         raise ValueError("Hay unidades con una solicitud pendiente. Resuélvela desde Solicitudes y devoluciones.")
+    details=p.get("details")
+    restock_units=None
+    if details is not None:
+        if not isinstance(details,list) or not details:
+            raise ValueError("Selecciona los detalles de la comanda que deseas devolver.")
+        original=list(db.execute("""SELECT detail_no,qty FROM inv_details WHERE order_id=? AND product_id=?
+                                   AND (status='Entregado' OR status IS NULL)""",(o["id"],pid)))
+        returned={number:units for (_,number),units in _returned_detail_totals(db,o["id"]).items()}
+        available=_detail_refundable(original,returned,line["refunded"])
+        picked={}
+        for d in details:
+            if not isinstance(d,dict):
+                raise ValueError("Revisa los detalles de la devolución.")
+            number=_id(d.get("detail_no"))
+            units=_scaled(d.get("qty"),1,"Unidades a devolver",high=10000)
+            if number in picked or units>available.get(number,0) or type(d.get("restock")) is not bool:
+                raise ValueError("Revisa las unidades y la reposición de cada detalle.")
+            picked[number]=(units,d["restock"])
+        if sum(units for units,_ in picked.values())!=n:
+            raise ValueError("La cantidad no coincide con los detalles seleccionados.")
+        restock_units=sum(units for units,restore in picked.values() if restore)
     restock=p.get("restock",[])
     if not isinstance(restock,list):
         raise ValueError("Revisa la selección de insumos recuperables.")
@@ -837,26 +904,33 @@ def _refund(db,user,p,*,resolving=0):
     grouped=defaultdict(list)
     for r in rows:
         grouped[r["item_id"]].append(r)
-    if resolving:
+    if resolving and details is None and "restock" not in p:
         restock=set(grouped)
     if not restock.issubset(grouped):
         raise ValueError("Solo se pueden devolver insumos de esta venta.")
     return_id=db.execute("""INSERT INTO inv_returns(order_id,product_id,qty,reason,at,operator,cash_day) OUTPUT INSERTED.id
                             VALUES(?,?,?,?,?,?,?)""",(o["id"],pid,n,reason,now(),user["name"],business_day(db))).lastrowid
+    if details is not None:
+        db.executemany("INSERT INTO inv_return_details(return_id,order_id,detail_no,qty,restock) VALUES(?,?,?,?,?)",
+                       ((return_id,o["id"],number,units,restore) for number,(units,restore) in picked.items()))
     return_code=public("DV",return_id)
     for item,parts in grouped.items():
-        needed=(sum(r["amount"] for r in parts)//line["qty"])*n
+        per_unit=sum(r["amount"] for r in parts)//line["qty"]
+        needed=per_unit*n
+        restore=per_unit*(restock_units if restock_units is not None else n if item in restock else 0)
         for r in parts:
             take=min(needed,r["amount"]-r["processed"])
             if not take:
                 continue
-            if item in restock:
-                if not resolving and r["expiry"] and r["expiry"]<today():
-                    raise ValueError("El lote original venció. Desmarca ese insumo para continuar.")
-                _move(db,user,r["lot_id"],take,"Devolución · "+reason,f"{return_code} · {_order_ref(o)}")
+            restocked=min(take,restore)
+            if restocked:
+                if (not resolving or details is not None) and r["expiry"] and r["expiry"]<today():
+                    raise ValueError("El lote original venció. Revisa los detalles marcados para volver al inventario.")
+                _move(db,user,r["lot_id"],restocked,"Devolución · "+reason,f"{return_code} · {_order_ref(o)}")
+                restore-=restocked
             if resolving:
                 db.execute("INSERT refund_parts(return_id,lot_id,amount,restocked) VALUES(?,?,?,?)",
-                           (return_id,r["lot_id"],take,take if item in restock else 0))
+                           (return_id,r["lot_id"],take,restocked))
             db.execute("UPDATE inv_alloc SET processed=processed+? WHERE order_id=? AND product_id=? AND lot_id=?",
                        (take,o["id"],pid,r["lot_id"]))
             needed-=take
@@ -867,6 +941,40 @@ def _refund(db,user,p,*,resolving=0):
     db.execute("UPDATE inv_orders SET status=?,version=version+1 WHERE id=?",("Cobrado" if remains else "Devuelto",o["id"]))
     _event(db,user,o["id"],"Devolución",f"{n} × {line['name']}. {reason}")
     return {"id":o["id"],"return_id":return_id,"return_code":return_code}
+
+
+def _refund_order(db,user,p):
+    _role(user,"caja","admin")
+    order=_get_order(db,p)
+    _check_version(order,p)
+    if order["status"]!="Cobrado":
+        raise ValueError("Selecciona una venta cobrada con unidades pendientes de devolución.")
+    if p.get("expected_day")!=business_day(db):
+        raise ValueError("Cambió la jornada de caja. Actualiza antes de devolver.")
+    entries=p.get("details")
+    if not isinstance(entries,list) or not entries:
+        raise ValueError("Selecciona al menos un detalle para devolver.")
+    reason=_text(p.get("reason"),"motivo",300)
+    products=dict(db.execute("""SELECT detail_no,product_id FROM inv_details
+                               WHERE order_id=? AND (status='Entregado' OR status IS NULL)""",(order["id"],)))
+    grouped=defaultdict(list)
+    for d in entries:
+        number=_id(d.get("detail_no")) if isinstance(d,dict) else None
+        if number not in products:
+            raise ValueError("Selecciona detalles cobrados de esta comanda.")
+        grouped[products[number]].append(d)
+    quantities={pid:sum(_scaled(d.get("qty"),1,"Unidades a devolver",high=10000) for d in details)
+                for pid,details in grouped.items()}
+    if p.get("whole") is True:
+        remaining=dict(db.execute("""SELECT product_id,qty-refunded FROM inv_lines
+                                    WHERE order_id=? AND qty>refunded""",(order["id"],)))
+        if quantities!=remaining:
+            raise ValueError("La selección debe cubrir todos los detalles pendientes de devolución.")
+    codes=[]
+    for pid,details in grouped.items():
+        result=_refund(db,user,{"id":order["id"],"product_id":pid,"qty":quantities[pid],"reason":reason,"details":details})
+        codes.append(result["return_code"])
+    return {"id":order["id"],"return_codes":codes}
 
 
 def _exchange(db,user,p):
@@ -911,13 +1019,17 @@ def _send_to_areas(db,user,p):
     if o["status"] != "Reservado" or _pending_cancel(db,o["id"]):
         raise ValueError("La comanda debe estar abierta, sin solicitud de cancelación.")
     details=[dict(r) for r in db.execute("""SELECT d.*,p.prep_area FROM inv_details d JOIN inv_products p
-                   ON p.id=d.product_id WHERE order_id=?""",(o["id"],))]
-    lines=[d for d in details if (d["product_id"],d["qty"])!=(d["sent_product"],d["sent_qty"])]
-    if not lines:
+                   ON p.id=d.product_id WHERE d.order_id=? AND ISNULL(d.status,'')<>'Cancelado'""",(o["id"],))]
+    removed=[d for d in details if d["remove_pending"]]
+    active=[d for d in details if not d["remove_pending"]]
+    lines=[d for d in active if (d["product_id"],d["qty"])!=(d["sent_product"],d["sent_qty"])]
+    if not lines and not removed:
         raise ValueError("No hay detalles pendientes de envío.")
     totals=defaultdict(int)
-    for d in details:
+    for d in active:
         totals[d["product_id"]]+=d["qty"]
+    for detail in removed:
+        _retire_detail(db,o["id"],detail["detail_no"])
     old={l["product_id"]:l for l in db.execute("SELECT * FROM inv_lines WHERE order_id=?",(o["id"],))}
     _reserve_lines(db,o["id"],totals,old,o["status"])
     at=now()
@@ -925,9 +1037,13 @@ def _send_to_areas(db,user,p):
         db.execute("""UPDATE inv_details SET sent_product=product_id,sent_qty=qty,area=?,status='En cola',
                    sent_at=?,started_at=NULL,ready_at=NULL,revision=revision+1 WHERE order_id=? AND detail_no=?""",
                    (_prep_area(d["prep_area"]),at,o["id"],d["detail_no"]))
-    db.execute("UPDATE inv_orders SET version=version+1 WHERE id=?",(o["id"],))
-    _event(db,user,o["id"],"Enviado a preparación",f"{len(lines)} productos")
-    return {"id":o["id"],"enviados":len(lines)}
+    db.execute("UPDATE inv_orders SET status=?,version=version+1 WHERE id=?",
+               ("Reservado" if active else "Cancelado",o["id"]))
+    if lines:
+        _event(db,user,o["id"],"Enviado a preparación",f"{len(lines)} productos")
+    if removed:
+        _event(db,user,o["id"],"Retirado de preparación",f"{len(removed)} detalles")
+    return {"id":o["id"],"enviados":len(lines),"retirados":len(removed),"cerrada":not active}
 
 
 def _advance_preparation(db,user,p):
@@ -963,7 +1079,7 @@ def _advance_preparation(db,user,p):
     db.execute("UPDATE inv_orders SET version=version+1 WHERE id=?",(o["id"],))
     if action=="entregar":
         # La entrega confirma exactamente lo que recibió el área, incluso si existe un cambio sin enviar.
-        db.execute("UPDATE inv_details SET product_id=sent_product,qty=sent_qty WHERE order_id=? AND detail_no=?",(o["id"],number))
+        db.execute("UPDATE inv_details SET product_id=sent_product,qty=sent_qty,remove_pending=0 WHERE order_id=? AND detail_no=?",(o["id"],number))
     _event(db,user,o["id"],after,f"{task['area']} · producto {pid}")
     return {"id":o["id"],"estado":after}
 
@@ -976,13 +1092,31 @@ def _ask_cancel(db,user,p):
         raise ValueError("La comanda ya está cerrada; utiliza devoluciones para ventas cobradas.")
     if _pending_cancel(db,o["id"]):
         raise ValueError("Ya existe una solicitud de cancelación pendiente.")
+    if not db.execute("SELECT 1 FROM inv_details WHERE order_id=? AND status='Entregado'",(o["id"],)).fetchone():
+        raise ValueError("La solicitud requiere un producto entregado. Anula la comanda antes del envío o retira sus detalles desde Atención.")
     reason=_text(p.get("reason"),"motivo",500)
-    if db.execute("SELECT 1 FROM inv_details WHERE sent_at IS NOT NULL AND order_id=? AND status=N'Entregado'",(o["id"],)).fetchone():
-        raise ValueError("Hay productos entregados; consulta con Caja para el ajuste correspondiente.")
     cid=db.execute("""INSERT INTO inv_cancel_requests(order_id,status,reason,requester,requested_at,requester_id,request_day)
                        OUTPUT INSERTED.id VALUES(?,'Pendiente',?,?,?,?,?)""",(o["id"],reason,user["name"],now(),user["id"],business_day(db))).lastrowid
     _event(db,user,o["id"],"Cancelación solicitada",reason)
     return {"id":o["id"],"solicitud_id":cid}
+
+
+def _consume_cancelled_deliveries(db,user,order,request_id,details,restock):
+    units=defaultdict(int)
+    for detail in details:
+        if detail["detail_no"] not in restock:
+            units[detail["sent_product"]]+=detail["sent_qty"]
+    consumed=defaultdict(int)
+    for pid,n in units.items():
+        recipe=db.execute("SELECT item_id,amount FROM inv_line_recipes WHERE order_id=? AND product_id=?",
+                          (order["id"],pid)).fetchall()
+        if not recipe:
+            raise ValueError("Falta la receta de un detalle entregado.")
+        for item,amount in recipe:
+            for lot,take,_ in withdraw(db,user,item,amount*n,"Entrega en comanda anulada",_order_ref(order)):
+                consumed[lot]+=take
+    db.executemany("INSERT INTO cancel_consumption(request_id,lot_id,amount) VALUES(?,?,?)",
+                   ((request_id,lot,amount) for lot,amount in consumed.items()))
 
 
 def _decide_cancel(db,user,p):
@@ -995,10 +1129,17 @@ def _decide_cancel(db,user,p):
         raise ValueError("La solicitud cambió. Actualiza antes de resolverla.")
     approved=p.get("approve") is True
     if approved:
-        # Una entrega física exige devolución supervisada, no liberar reservas ficticiamente.
-        if db.execute("SELECT 1 FROM inv_details WHERE sent_at IS NOT NULL AND order_id=? AND status=N'Entregado'",(o["id"],)).fetchone():
-            raise ValueError("No se puede cancelar: existen productos entregados.")
+        delivered=list(db.execute("""SELECT detail_no,sent_product,sent_qty FROM inv_details
+                                    WHERE order_id=? AND status='Entregado'""",(o["id"],)))
+        selected=p.get("restock_details",[] if not delivered else None)
+        if not isinstance(selected,list):
+            raise ValueError("Indica qué detalles entregados regresan al inventario.")
+        restock={_id(number) for number in selected}
+        if not restock.issubset(d["detail_no"] for d in delivered):
+            raise ValueError("Selecciona únicamente detalles entregados de esta comanda.")
         _release(db,o["id"])
+        if delivered:
+            _consume_cancelled_deliveries(db,user,o,r["id"],delivered,restock)
         db.execute("UPDATE inv_orders SET status='Cancelado',version=version+1 WHERE id=?",(o["id"],))
     db.execute("UPDATE inv_cancel_requests SET status=?,decided_at=?,decided_by=?,decision_reason=?,prior_status=?,revision=revision+1 WHERE id=?",
                ("Aprobada" if approved else "Rechazada",now(),user["name"],
@@ -1016,7 +1157,7 @@ def _preparation(db,user):
                  THEN 1 ELSE 0 END AS cancel_pending
             FROM inv_details d JOIN inv_orders o ON o.id=d.order_id
             JOIN inv_lines l ON l.order_id=d.order_id AND l.product_id=d.sent_product
-            WHERE o.status='Reservado'"""
+            WHERE o.status='Reservado' AND d.status<>'Cancelado'"""
     params=[]
     if user["role"]=="area":
         query+=" AND d.area=?"
@@ -1116,6 +1257,7 @@ def _orders(db,user,balances):
     rows={r["id"]:dict(r) for r in db.execute(sql+" ORDER BY id DESC")}
     if not rows:
         return []
+    returned_details={} if attending else _returned_detail_totals(db)
     for r in rows.values():
         r["code"]=public("C",r["number"])
         r.update(lines=[],total=0,gross=0)
@@ -1162,7 +1304,7 @@ def _orders(db,user,balances):
         if row["order_id"] in rows:
             d=dict(row)
             d["price"]/=100
-            d["pending"]=d["status"]!="Cancelado" and (d["product_id"],d["qty"])!=(d["sent_product"],d["sent_qty"])
+            d["pending"]=d["status"]!="Cancelado" and (d["remove_pending"] or (d["product_id"],d["qty"])!=(d["sent_product"],d["sent_qty"]))
             rows[d["order_id"]]["details"].append(d)
     pending={r["order_id"]:dict(r) for r in db.execute("SELECT order_id,id,revision,reason,requested_at FROM inv_cancel_requests WHERE status='Pendiente'")}
     for o in rows.values():
@@ -1191,7 +1333,8 @@ def _orders(db,user,balances):
     detail_groups=defaultdict(list)
     for order in rows.values():
         for d in order["details"]:
-            detail_groups[(order["id"],d["product_id"])].append(d)
+            if d["status"]!="Cancelado":
+                detail_groups[(order["id"],d["product_id"])].append(d)
     for row in db.execute(line_sql+" ORDER BY l.order_id,l.product_id"):
         line=dict(row)
         order=rows[line.pop("order_id")]
@@ -1202,6 +1345,12 @@ def _orders(db,user,balances):
         line["ingredients"]=ingredients[key]
         group=detail_groups[key]
         line["prep_status"]="Entregado" if group and all(d["status"]=="Entregado" for d in group) else "Pendiente"
+        if order["status"]=="Cobrado":
+            candidates=[d for d in group if d["status"] in ("Entregado",None)]
+            returned={d["detail_no"]:returned_details.get((order["id"],d["detail_no"]),0) for d in candidates}
+            available=_detail_refundable(candidates,returned,line["refunded"])
+            for d in candidates:
+                d["refundable_qty"]=available[d["detail_no"]]
         if key in capacity:
             line["max_qty"]=capacity[key]+(line["qty"] if order["status"]=="Reservado" else 0)
             line["recipe"]=saved_recipes[key]
@@ -1212,7 +1361,8 @@ def _orders(db,user,balances):
         if r["status"]=="Anulada":
             r["total"]=0
         if r["status"] in ("Reservado","Por revisar"):
-            r["total"]=sum(round(d["price"]*100)*d["qty"] for d in r["details"])/100
+            r["total"]=sum(round(d["price"]*100)*d["qty"] for d in r["details"]
+                           if d["status"]!="Cancelado" and not d["remove_pending"])/100
     return list(rows.values())
 
 
@@ -1287,8 +1437,9 @@ def _resolve_refund(db,user,p):
     reason=None if approved else _text(p.get("reason"),"motivo del rechazo",300)
     credit=None
     if approved:
+        selection={key:p[key] for key in ("details","restock") if key in p}
         credit=_refund(db,user,dict(id=req["order_id"],product_id=req["product_id"],qty=req["qty"],
-                       reason=req["reason"]),resolving=req["id"])["return_id"]
+                       reason=req["reason"],**selection),resolving=req["id"])["return_id"]
     db.execute("UPDATE refund_requests SET status=?,decided_by=?,decided_at=?,decision_reason=?,return_id=?,revision=revision+1 WHERE id=?",
                ("Aprobada" if approved else "Rechazada",user["name"],now(),reason,credit,req["id"]))
     return {}
@@ -1314,9 +1465,8 @@ def _undo_request(db,user,p):
     oid=order["id"]
     approved=req["status"]=="Aprobada"
     if cancellation:
-        if _pending_cancel(db,oid) or order["paid_at"] or db.execute(
-                "SELECT 1 FROM inv_details WHERE order_id=? AND status='Entregado'",(oid,)).fetchone():
-            raise ValueError("La comanda tiene otra solicitud pendiente, un cobro o una entrega posterior.")
+        if _pending_cancel(db,oid) or order["paid_at"]:
+            raise ValueError("La comanda tiene otra solicitud pendiente o ya fue cobrada.")
         if approved:
             if order["status"]!="Cancelado":
                 raise ValueError("La comanda ya cambió de estado.")
@@ -1324,6 +1474,9 @@ def _undo_request(db,user,p):
                       AND (table_number=? OR table_name=?)""",(order["day"],oid,order["table_number"],order["table_name"])).fetchone():
                 raise ValueError("La mesa está ocupada por otra comanda.")
             status=req["prior_status"] or "Reservado"
+            for lot,amount in db.execute("SELECT lot_id,amount FROM cancel_consumption WHERE request_id=?",(req["id"],)):
+                _move(db,user,lot,amount,"Reversión de anulación de comanda",_order_ref(order))
+            db.execute("DELETE FROM cancel_consumption WHERE request_id=?",(req["id"],))
             if status=="Reservado":
                 lines={r["product_id"]:r for r in db.execute("SELECT * FROM inv_lines WHERE order_id=?",(oid,))}
                 _reserve_lines(db,oid,{k:r["qty"] for k,r in lines.items()},lines,"Por revisar")
@@ -1383,6 +1536,7 @@ def act(db,user,action,payload):
             "inv.item":_save_item,"inv.item_category":_item_category,"inv.item_unit":_configure_item_unit,
             "inv.product":_save_product,"inv.rule":_rule,"inv.transform":_transform,
             "pedidos.save":_save_order,"pedidos.cancel":_cancel,"pedidos.pay":_pay,"pedidos.refund":_refund,
+            "pedidos.refund_order":_refund_order,
             "pedidos.exchange":_exchange,
             "pedidos.send":_send_to_areas,"pedidos.prep":_advance_preparation,
             "pedidos.request_cancel":_ask_cancel,"pedidos.decide_cancel":_decide_cancel}

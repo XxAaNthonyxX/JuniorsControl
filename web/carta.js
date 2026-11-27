@@ -40,6 +40,14 @@ function stockForMenu(replaced){
      balances.set(id,balances.get(id)-Math.round(ingredient.qty*1000)*line.qty);
    }
  }
+ const kept=new Set(ticket.lines.map(l=>l.detail_no));
+ for(const detail of order?.details||[]){
+   if(!detail.sent_at||detail.status==="Cancelado"||kept.has(detail.detail_no))continue;
+   for(const ingredient of recipes.get(detail.sent_product)||[]){
+     const id=ingredient.item_id;
+     balances.set(id,balances.get(id)-Math.round(ingredient.qty*1000)*detail.sent_qty);
+   }
+ }
  return {recipes,balances};
 }
 function menuAvailability(product,stock){
@@ -59,9 +67,9 @@ function addDetail(p){
  const slot=replacementSlot();
  const {available}=menuAvailability(p,stockForMenu(slot));
  if(available<1){toast("Producto sin disponibilidad.",true);return}
- const detail={detail_no:slot?.detail_no??(Math.max(0,...ticket.lines.map(l=>l.detail_no))+1),
+ const detail={detail_no:slot?.detail_no??(ticket.nextDetailNo??1),
    product_id:p.id,name:originalLine(p)?.name??p.name,price:priceFor(p),qty:1};
- if(slot)Object.assign(slot,detail);else ticket.lines.push(detail);
+ if(slot)Object.assign(slot,detail);else {ticket.lines.push(detail);ticket.nextDetailNo=detail.detail_no+1}
  ticket.replaceNumber=null;
  drawPOS();
 }
@@ -74,14 +82,22 @@ function changeDetailQty(l,delta){
  if(!l.qty){l.product_id=null;l.price=0;ticket.replaceNumber=l.detail_no}
  drawPOS();
 }
+function removeDetail(line){
+ if(line.status==="Entregado")return;
+ ticket.lines=ticket.lines.filter(other=>other!==line);
+ if(ticket.replaceNumber===line.detail_no)ticket.replaceNumber=null;
+ if(line.sent_at)ticket.pendingRemoval=true;
+ drawPOS();
+}
 function detailCard(l){
- if(!l.product_id)return `<div class="ticket-item"><strong>Detalle ${l.detail_no}</strong><p>Selecciona un producto de la carta.</p></div>`;
  const delivered=l.status==="Entregado";
+ const remove=delivered?"":button("Eliminar detalle",()=>removeDetail(l),"link");
+ if(!l.product_id)return `<div class="ticket-item"><strong>Detalle ${l.detail_no}</strong><p>Selecciona un producto de la carta.</p>${remove}</div>`;
  const unsent=l.product_id!==l.sent_product||l.qty!==l.sent_qty;
  const state=delivered?"Entregado":unsent?"Pendiente de envío":l.status;
- const controls=delivered?"":`<div class="stepper"><button aria-label="Quitar una unidad" ${bind(()=>changeDetailQty(l,-1))}>−</button><b>${l.qty}</b><button aria-label="Añadir una unidad" ${bind(()=>changeDetailQty(l,1))}>+</button></div>
- ${button(ticket.replaceNumber===l.detail_no?"Selecciona el reemplazo en la carta":"Cambiar producto",()=>{ticket.replaceNumber=l.detail_no;drawPOS();jumpTo(".catalog")},"link")}`;
- return `<div class="ticket-item"><strong>Detalle ${l.detail_no} · ${h(l.name)}</strong><small class="sub">${l.qty} × ${cash(l.price)} · ${h(state)}</small><div class="ticket-item-bottom">${controls}<b>${cash(l.qty*l.price)}</b></div></div>`;
+ const controls=delivered?"":`<div class="actions"><div class="stepper"><button aria-label="Quitar una unidad" ${bind(()=>changeDetailQty(l,-1))}>−</button><b>${l.qty}</b><button aria-label="Añadir una unidad" ${bind(()=>changeDetailQty(l,1))}>+</button></div>
+ ${button(ticket.replaceNumber===l.detail_no?"Selecciona el reemplazo en la carta":"Cambiar producto",()=>{ticket.replaceNumber=l.detail_no;drawPOS();jumpTo(".catalog")},"link")}${remove}</div>`;
+ return `<div class="ticket-item"><strong>Detalle ${l.detail_no} · ${h(l.name)}</strong><small class="sub">${l.qty} × ${cash(l.price)} · ${h(state)}</small><div class="ticket-item-bottom">${controls}<b style="white-space:nowrap">${cash(l.qty*l.price)}</b></div></div>`;
 }
 function productStock(p){
  const rows=p.recipe.map(line=>{
@@ -117,15 +133,21 @@ function ticketPanel(){
  const activeDetails=(savedOrder?.details||[]).filter(d=>d.status!=="Cancelado");
  const modeLocked=activeDetails.length>0&&activeDetails.every(d=>d.status==="Entregado");
  const n=ticket.lines.reduce((a,l)=>a+l.qty,0);
+ const canSaveEmpty=!!savedOrder?.details.some(d=>d.sent_at);
  const preview=ticket.id?null:S.next_order_code;
  const code=ticket.id?ticket.code:preview;
+ const removalNotice=ticket.pendingRemoval?'<p class="notice">Guarda los cambios y usa Enviar a preparación para retirar el detalle de la cola del área.</p>':"";
+ const emptyNotice=ticket.id&&!ticket.lines.length?(canSaveEmpty?
+   '<p class="muted">Al retirar el último detalle, la comanda se cerrará y liberará la mesa.</p>':
+   `<p class="muted">Agrega otro producto o anula la comanda.</p>${savedOrder&&canCancelUnsent(savedOrder)?
+     button("Anular comanda",()=>cancelUnsent(savedOrder),"danger"):""}`):"";
  return `<section class="ticket" tabindex="-1" aria-label="Pedido actual"><header><div class="ticket-icon">${icon("receipt")}</div><div><div class="eyebrow">${ticket.id?"EDITAR COMANDA":"NUEVA COMANDA"}</div><h2>${code?h(code):"Pedido actual"}</h2>${preview?'<p class="sub">Número provisional hasta registrar</p>':""}</div>${button("Volver a la carta",()=>jumpTo(".catalog"),"link catalog-jump")}</header><div class="ticket-ref"><label class="field"><span>Modalidad de consumo</span><select name="take_away" ${modeLocked?"disabled":""}><option value="0" ${!ticket.take_away?"selected":""}>En el local</option><option value="1" ${ticket.take_away?"selected":""}>Para llevar</option></select></label>${modeLocked?'<small class="muted">Pedido entregado · modalidad bloqueada</small>':""}<div class="grid2">
  ${select("piso","Piso",[[1,"Piso 1 · Mesas 1 a 10"],[2,"Piso 2 · Mesas 11 a 20"]],ticket.floor||1)}
  <label class="field"><span>Número de mesa</span><select id="mesa" name="table_number" required><option value="">Selecciona mesa</option>${Array.from({length:10},(_,i)=>(ticket.floor===2?11:1)+i).map(n=>{
  const occupied=(S.orders||[]).some(o=>o.day===(ticket.day||S.today)&&["Reservado","Por revisar"].includes(o.status)&&o.id!==ticket.id&&(Number(o.table_number)===n||(!o.table_number&&["Mesa "+n,String(n)].includes(o.table_name))));
  return `<option value="${n}" ${Number(ticket.table_number)===n?"selected":""} ${occupied?"disabled":""}>Mesa ${n}${occupied?" · OCUPADA":" · Disponible"}</option>`}).join("")}</select></label></div>
  <p class="muted" style="font-size:12px">Una mesa puede tener una sola comanda activa por fecha. La cancelación solicitada NO libera la mesa.</p></div>
- <div class="ticket-items">${ticket.lines.length?ticket.lines.map(detailCard).join(""):`<div class="ticket-empty"><span>${icon("plate")}</span><b>Comanda vacía</b><p>Agrega un producto de la carta para comenzar.</p></div>`}</div><div class="ticket-bottom"><div class="line"><span>Productos</span><b>${n}</b></div><div class="total"><strong>Total</strong><strong>${cash(sumTicket())}</strong></div><button class="btn primary big" ${n&&ticket.lines.every(l=>l.product_id)?bind(saveTicket):"disabled"}>${icon("receipt")}${ticket.id?"Guardar cambios":"Registrar comanda"}</button>${ticket.id||n?button(ticket.id?"Salir de la edición":"Vaciar comanda",()=>modal("Descartar borrador","<p>Se descartarán los cambios de esta comanda que aún no guardaste.</p>",async()=>{resetTicket();render()},"Descartar"),"link clear-ticket"):""}</div></section>`;
+ <div class="ticket-items">${ticket.lines.length?ticket.lines.map(detailCard).join(""):`<div class="ticket-empty"><span>${icon("plate")}</span><b>Comanda vacía</b><p>Agrega un producto de la carta para comenzar.</p></div>`}${removalNotice}${emptyNotice}</div><div class="ticket-bottom"><div class="line"><span>Productos</span><b>${n}</b></div><div class="total"><strong>Total</strong><strong>${cash(sumTicket())}</strong></div><button class="btn primary big" ${(n||canSaveEmpty)&&ticket.lines.every(l=>l.product_id)?bind(saveTicket):"disabled"}>${icon("receipt")}${ticket.id?"Guardar cambios":"Registrar comanda"}</button>${ticket.id||n?button(ticket.id?"Salir de la edición":"Vaciar comanda",()=>modal("Descartar borrador","<p>Se descartarán los cambios de esta comanda que aún no guardaste.</p>",async()=>{resetTicket();render()},"Descartar"),"link clear-ticket"):""}</div></section>`;
 }
 function posBody(){
  const categories=new Set(S.menu_categories??S.products.map(product=>product.category));
@@ -147,10 +169,18 @@ async function saveTicket(){if(!ticket.table_number){document.querySelector("#me
  const payload={take_away:ticket.take_away,expected_day:ticket.day||S.today,table_number:ticket.table_number,lines:ticket.lines.map(({detail_no,product_id,qty})=>({detail_no,product_id,qty}))};
  if(ticket.id)Object.assign(payload,{id:ticket.id,version:ticket.version});
  const b=document.querySelector(".ticket-bottom .primary");if(b)b.disabled=true;
- try{const result=await api("pedidos.save",payload);const edited=ticket.id;resetTicket();await reload();orderFilter="Abiertas";orderDay=null;orderQuery="";go("atencion");toast(`${result.code} ${edited?"actualizada":"registrada"}. Insumos reservados.`)}finally{if(b)b.disabled=false}
+ try{const result=await api("pedidos.save",payload);const edited=ticket.id;const removal=ticket.pendingRemoval;resetTicket();await reload();orderFilter="Abiertas";orderDay=null;orderQuery="";go("atencion");toast(`${result.code} ${edited?"actualizada":"registrada"}.${removal?" Envía los cambios a preparación para confirmar el retiro.":""}`)}finally{if(b)b.disabled=false}
 }
 function editOrder(o){
- const change=()=>{ticket={take_away:!!o.take_away,id:o.id,version:o.version,code:o.code,day:o.day,table_name:o.table_name,table_number:o.table_number||Number(String(o.table_name).replace(/^Mesa /i,"")),floor:o.floor||(Number(o.table_number||String(o.table_name).replace(/^Mesa /i,""))>10?2:1),lines:o.details.map(l=>({...l}))};menuQuery="";menuCategory="Todos";go("atencion")};
+ const change=()=>{
+   ticket={take_away:!!o.take_away,id:o.id,version:o.version,code:o.code,day:o.day,table_name:o.table_name,
+     table_number:o.table_number||Number(String(o.table_name).replace(/^Mesa /i,"")),
+     floor:o.floor||(Number(o.table_number||String(o.table_name).replace(/^Mesa /i,""))>10?2:1),
+     nextDetailNo:Math.max(0,...o.details.map(l=>l.detail_no))+1,
+     pendingRemoval:o.details.some(l=>l.remove_pending),
+     lines:o.details.filter(l=>l.status!=="Cancelado"&&!l.remove_pending).map(l=>({...l}))};
+   menuQuery="";menuCategory="Todos";go("atencion");
+ };
  if(ticket.lines.length&&ticket.id!==o.id){modal("Cambiar de comanda","<p>Se descartarán los cambios del borrador abierto en atención.</p>",async()=>change(),"Continuar")}else{change()}
 }
 function formatPayments(payments, fallback=""){
@@ -213,7 +243,54 @@ function chargeOrder(o){
    }
  });
 }
+function refundDetailFields(details){
+ return table(["Detalle","Producto","Unidades a devolver","Regresa al inventario"],details.map(d=>[
+   h(d.detail_no),h(d.name),input("qty_"+d.detail_no,`Hasta ${d.refundable_qty}`,"number",0,
+     `min="0" step="1" max="${d.refundable_qty}" data-refund-qty`),
+   `<label class="check"><input type="checkbox" name="restock_${d.detail_no}" aria-label="Reponer detalle ${d.detail_no}"> Sí</label>`,
+ ]));
+}
+function selectedRefundDetails(details,values){
+ return details.map(d=>({detail_no:d.detail_no,qty:Number(values["qty_"+d.detail_no]||0),
+   restock:!!values["restock_"+d.detail_no]})).filter(d=>d.qty>0);
+}
+function refundOrder(o,productId=null){
+ const details=o.details.filter(d=>d.refundable_qty>0&&(productId===null||d.product_id===productId));
+ if(!details.length){toast("No hay detalles con unidades pendientes de devolución.",true);return}
+ const price=new Map(details.map(d=>[d.detail_no,Math.round(d.price*100)]));
+ const day=S.today;
+ const scope=productId===null?select("scope","Qué devolver",[["items","Seleccionar detalles"],["whole","Devolver toda la comanda"]],"items"):"";
+ const dialog=modal("Devolución · "+o.code,scope+refundDetailFields(details)+
+   input("reason","Motivo de devolución","text","","required maxlength=300")+
+   '<div class="summary" aria-live="polite"><span>Importe a devolver de caja</span><b id="refund-total"></b></div>',
+   values=>{
+     const selected=selectedRefundDetails(details,values);
+     if(!selected.length)throw Error("Indica las unidades de al menos un detalle.");
+     return run("pedidos.refund_order",{id:o.id,version:o.version,expected_day:day,reason:values.reason,
+       whole:values.scope==="whole",details:selected},"Devolución registrada en caja");
+   },"Confirmar devolución");
+ const form=dialog.querySelector("form");
+ const summary=dialog.querySelector("#refund-total");
+ const update=()=>{
+   const entries=selectedRefundDetails(details,Object.fromEntries(new FormData(form)));
+   const amount=entries.reduce((c,d)=>c+d.qty*price.get(d.detail_no),0);
+   summary.textContent=cash(amount/100);
+ };
+ form.elements.namedItem("scope")?.addEventListener("change",e=>{
+   const whole=e.target.value==="whole";
+   for(const field of form.querySelectorAll("[data-refund-qty]")){
+     field.readOnly=whole;field.value=whole?field.max:0;
+   }
+   update();
+ });
+ form.addEventListener("input",update);
+ update();
+}
 function refund(o,l,exchange=false){
+ if(!exchange&&o.details.some(d=>d.product_id===l.product_id&&d.refundable_qty>0)){
+   refundOrder(o,l.product_id);
+   return;
+ }
  const max=l.qty-l.refunded, alternatives=S.products.filter(p=>p.id!==l.product_id);
  if(exchange&&!alternatives.length){toast("Agrega otro producto a la carta antes de registrar un cambio.",true);return}
  const restockFields=l.ingredients.map(i=>`<label class="check"><input type="checkbox" name="rec_${i.item_id}">${h(i.name)}</label>`).join("");
@@ -240,20 +317,44 @@ function refund(o,l,exchange=false){
 }
 function sendToPreparation(o){
  const pending=o.details.filter(l=>l.pending);
- modal("Enviar productos · "+o.code,`<p>Se enviarán ${pending.length} detalle(s) pendientes a Cocina, Barra o Parrilla. Los cambios se reflejarán en la cola del área al confirmar.</p>${table(["Producto","Área","Cantidad"],pending.map(l=>[h("Detalle "+l.detail_no+" · "+l.name),h(S.products.find(p=>p.id===l.product_id)?.prep_area||"Cocina"),h(l.qty)]))}`,async()=>run("pedidos.send",{id:o.id,version:o.version},"Pedido enviado a las áreas de preparación"),"Enviar pedido");
+ const rows=pending.map(l=>[
+   h("Detalle "+l.detail_no+" · "+l.name),
+   h(l.remove_pending?l.area:productBy(l.product_id)?.prep_area||"Cocina"),h(l.qty),
+   l.remove_pending?"Retirar":"Enviar",
+ ]);
+ modal("Enviar cambios · "+o.code,`<p>Los cambios se aplicarán a la cola de cada área al confirmar.</p>${table(["Producto","Área","Cantidad","Acción"],rows)}`,
+   async()=>{
+     const result=await run("pedidos.send",{id:o.id,version:o.version},"");
+     toast(result.cerrada?"Comanda cerrada. Mesa e insumos liberados.":"Cola de preparación actualizada.");
+   },"Confirmar envío");
+}
+function canCancelUnsent(o){
+ return !o.cancel_request&&["Reservado","Por revisar"].includes(o.status)&&!o.details.some(d=>d.sent_at);
+}
+function cancelUnsent(o){
+ modal("Anular comanda · "+o.code,`<p>Se anulará la comanda de ${h(o.table_name)} y se liberarán la mesa y sus insumos reservados.</p>`,
+   async()=>{await run("pedidos.cancel",{id:o.id,version:o.version},"Comanda anulada. Mesa e insumos liberados.");if(ticket.id===o.id){resetTicket();render()}},"Anular comanda");
 }
 function requestCancel(o){
  modal("Solicitar cancelación · "+o.code,input("reason","Motivo de cancelación","text","","required maxlength=500")+"<p>La mesa seguirá ocupada hasta la aprobación de Caja o Administración.</p>",async v=>run("pedidos.request_cancel",{id:o.id,version:o.version,reason:v.reason},"Solicitud enviada; la mesa continúa ocupada."),"Solicitar cancelación");
 }
 function decideCancel(o){
  const reason=o.cancel_request?.reason||"";
- modal("Resolver cancelación · "+o.code,`<p><b>Motivo:</b> ${h(reason)}</p>${select("approve","Decisión",[["yes","Aprobar y liberar mesa"],["no","Rechazar y mantener comanda"]])}${input("reason","Observación (opcional)","text","","maxlength=300")}`,async v=>run("pedidos.decide_cancel",{id:o.id,request_id:o.cancel_request.id,revision:o.cancel_request.revision,reason:v.reason,approve:v.approve==="yes"},"Cancelación resuelta."),"Confirmar decisión");
+ const delivered=o.details.filter(d=>d.status==="Entregado");
+ const inventory=delivered.length?`<fieldset id="cancel-restock"><legend>Detalles que regresan al inventario</legend>
+   ${delivered.map(d=>`<label class="check"><input type="checkbox" name="restock_${d.detail_no}">Detalle ${d.detail_no} · ${h(d.name)} × ${d.qty}</label>`).join("")}
+   <p class="muted">Los detalles entregados que queden sin marcar se registrarán como consumo.</p></fieldset>`:"";
+ const dialog=modal("Resolver cancelación · "+o.code,`<p><b>Motivo</b> ${h(reason)}</p>${select("approve","Decisión",[["yes","Aprobar y liberar mesa"],["no","Rechazar y mantener comanda"]])}${inventory}${input("reason","Observación (opcional)","text","","maxlength=300")}`,v=>
+   run("pedidos.decide_cancel",{id:o.id,request_id:o.cancel_request.id,revision:o.cancel_request.revision,reason:v.reason,
+     approve:v.approve==="yes",restock_details:delivered.filter(d=>v["restock_"+d.detail_no]).map(d=>d.detail_no)},"Cancelación resuelta."),"Confirmar decisión");
+ const stock=dialog.querySelector("#cancel-restock");
+ if(stock)dialog.querySelector('[name="approve"]').addEventListener("change",e=>{stock.hidden=e.target.value==="no"});
 }
 function displayOrderStatus(o){
  if(o.cancel_request)return "Cancelación solicitada";
  if(o.status!=="Reservado")return o.status;
  if(!o.lines.length||o.details.some(l=>l.pending))return "Pendiente de envío";
- if(o.details.every(l=>l.status==="Entregado"))return "Entregada · por cobrar";
+ if(o.details.filter(l=>l.status!=="Cancelado").every(l=>l.status==="Entregado"))return "Entregada · por cobrar";
  return "En preparación";
 }
 function details(o,manageReturns=false){
@@ -263,7 +364,7 @@ function details(o,manageReturns=false){
  const origin=o.exchange_origin;
  const paymentSummary=formatPayments(o.payments,o.payment_method);
  const source=origin?`<p class="notice">Reemplazo ${h(origin.exchange_code)} de la venta ${h(origin.sale_code)} · ${h(origin.code)} del ${h(displayDate(origin.day))} · Devolución ${h(origin.return_code)}.</p>`:"";
- modal(o.code+" · "+o.table_name,`${o.sale_void?`<p class="notice">Venta anulada · ${h(o.sale_void.actor)} · ${h(o.sale_void.at)} · ${h(o.sale_void.reason)}</p>`:""}${source}<p class="notice">${o.take_away?"Para llevar":"En el local"}</p>${table(["Detalle","Producto","Cantidad","Estado"],o.details.map(d=>[d.detail_no,h(d.name),d.qty,h(d.pending?"Pendiente de envío":d.status)]))}<div class="summary"><span>${h(displayDate(o.day))} · ${h(o.operator)}</span>${badge(o.status)}</div>${table(["Producto","Uds.","Precio","Preparación / entrega","Dev.","Neto",""],rows)}<div class="total"><strong>Total neto</strong><strong>${cash(o.total)}</strong></div>${o.paid_at?`<p class="muted">Venta ${h(o.sale_code)} · Cobro registrado el ${h(o.paid_at)} por ${h(o.cashier)}.</p>${paymentSummary?`<p>${h(paymentSummary)}</p>`:""}`:""}${returns.length?`<h3>Devoluciones</h3>${table(["Código","Producto","Uds.","Motivo","Responsable"],returns)}`:""}`,null);
+ modal(o.code+" · "+o.table_name,`${o.sale_void?`<p class="notice">Venta anulada · ${h(o.sale_void.actor)} · ${h(o.sale_void.at)} · ${h(o.sale_void.reason)}</p>`:""}${source}<p class="notice">${o.take_away?"Para llevar":"En el local"}</p>${table(["Detalle","Producto","Cantidad","Estado"],o.details.map(d=>[d.detail_no,h(d.name),d.qty,h(d.remove_pending&&d.pending?"Retiro pendiente de envío":d.pending?"Pendiente de envío":d.status)]))}<div class="summary"><span>${h(displayDate(o.day))} · ${h(o.operator)}</span>${badge(o.status)}</div>${table(["Producto","Uds.","Precio","Preparación / entrega","Dev.","Neto",""],rows)}<div class="total"><strong>Total neto</strong><strong>${cash(o.total)}</strong></div>${o.paid_at?`<p class="muted">Venta ${h(o.sale_code)} · Cobro registrado el ${h(o.paid_at)} por ${h(o.cashier)}.</p>${paymentSummary?`<p>${h(paymentSummary)}</p>`:""}`:""}${returns.length?`<h3>Devoluciones</h3>${table(["Código","Producto","Uds.","Motivo","Responsable"],returns)}`:""}`,null);
 }
 function viewOrdersDay(day){
  orderDay=day;orderQuery="";orderFilter="Todas";go("comandas");
@@ -283,6 +384,7 @@ function orderTable(){
      acts+=button("Editar comanda",()=>editOrder(o),"secondary");
      if(o.details.some(d=>d.pending))acts+=button("Enviar al área de preparación",()=>sendToPreparation(o),"primary");
    }
+   if(canCancelUnsent(o))acts+=button("Anular comanda",()=>cancelUnsent(o),"danger");
  }
  return [`<b class="mono">${orderCode(o)}</b>`,`<strong>${h(o.table_name)}</strong><small class="sub">${o.take_away?"Para llevar":"En el local"}</small><small class="sub">${o.floor?`Piso ${o.floor}`:"Anterior a la actualización"}</small>`,badge(displayOrderStatus(o))+(o.cancel_request?`<small class="sub">${h(o.cancel_request.reason)}</small>`:""),h(o.created),cash(o.total),`<div class="actions">${acts}</div>`]}),"No hay comandas que coincidan con estos filtros.");
 }

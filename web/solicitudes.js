@@ -8,11 +8,25 @@
      v=>run("pedidos.request_refund",{id:r.id,product_id:r.product_id,qty:v.qty,reason:v.reason},"Solicitud registrada"));
  }
  function decide(r,approve){
-   const fields=approve?"<p>Al aprobar se repondrán en sus lotes todos los insumos de las unidades devueltas.</p>":
+   const order=S.orders.find(o=>o.id===r.order_id);
+   const details=(order?.details||[]).filter(d=>d.product_id===r.product_id&&d.refundable_qty>0);
+   const ingredients=order?.lines.find(l=>l.product_id===r.product_id)?.ingredients||[];
+   const fields=approve?(details.length?
+     `<p>Selecciona ${r.qty} unidades y marca los detalles que regresan al inventario.</p>`+refundDetailFields(details):
+     `<fieldset><legend>Insumos que regresan al inventario</legend>${ingredients.map(i=>
+       `<label class="check"><input type="checkbox" name="restock_${i.item_id}">${h(i.name)}</label>`).join("")}</fieldset>`):
      input("reason","Motivo del rechazo","text","","required maxlength=300");
    modal(approve?"Aprobar devolución":"Rechazar devolución",`<p>${h(reference(r))} · ${r.qty} × ${h(r.name)}</p><p>${h(r.reason)}</p>`+fields,
-     v=>run("pedidos.resolve_refund",{id:r.id,revision:r.revision,approve,reason:v.reason},
-       approve?"Devolución registrada en caja":"Solicitud rechazada"),approve?"Confirmar devolución":"Rechazar");
+     v=>{
+       const payload={id:r.id,revision:r.revision,approve,reason:v.reason};
+       if(approve&&details.length){
+         payload.details=selectedRefundDetails(details,v);
+         if(payload.details.reduce((sum,d)=>sum+d.qty,0)!==r.qty)throw Error(`Selecciona exactamente ${r.qty} unidades.`);
+       }else if(approve){
+         payload.restock=ingredients.filter(i=>v["restock_"+i.item_id]).map(i=>i.item_id);
+       }
+       return run("pedidos.resolve_refund",payload,approve?"Devolución registrada en caja":"Solicitud rechazada");
+     },approve?"Confirmar devolución":"Rechazar");
  }
  function undo(r,kind){
    const effect=r.status==="Rechazada"?"Podrás volver a resolver la solicitud.":kind==="cancel"?
@@ -23,7 +37,7 @@
  }
  pages.solicitudes=()=>{
    const data=S.service_requests,manager=["admin","caja"].includes(S.user.role);
-   const open=S.orders.filter(o=>o.day===S.today&&["Reservado","Por revisar"].includes(o.status)&&!o.cancel_request&&!o.details.some(d=>d.status==="Entregado"));
+   const open=S.orders.filter(o=>o.day===S.today&&["Reservado","Por revisar"].includes(o.status)&&!o.cancel_request&&o.details.some(d=>d.status==="Entregado"));
    const cancels=data.cancellations.map(r=>{
      const order=S.orders.find(o=>o.id===r.order_id);
      return [h(reference(r)),h(r.reason),h(r.requester),h(r.requested_at),badge(r.status),h(r.decided_by||""),h([r.decided_at,r.decision_reason].filter(Boolean).join(" · ")),

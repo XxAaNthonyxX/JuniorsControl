@@ -111,10 +111,13 @@ def run():
     action(gestion,"gestion.cash_day",{"day":"2020-02-29"})
     action(inv,"pedidos.save",dict(table_number=11,lines=details(6)))
     assert order()["day"]=="2020-02-29" and order()["code"]=="C0001"
+    rechazado(ValueError,lambda: act("request_cancel",reason="Sin entregas"))
+    act("send")
+    deliver(next(r for r in snapshot()["preparation"] if r["order_id"]==order()["id"]))
     act("request_cancel",reason="Prueba de bloqueo")
     rechazado(ValueError,lambda: act("save",lines=details(6,6)))
     rechazado(ValueError,lambda: act("send"))
-    act("decide_cancel",approve=True)
+    act("decide_cancel",approve=True,restock_details=[1])
     assert order()["status"]=="Cancelado"
     requests=snapshot()["service_requests"]
     assert not requests["refunds"] and not requests["refundable"]
@@ -124,7 +127,7 @@ def run():
     assert order()["status"]=="Reservado" and order()["cancel_request"]
     act("decide_cancel",approve=False)
     action(inv,"pedidos.undo_request",dict(undo,revision=3))
-    act("decide_cancel",approve=True)
+    act("decide_cancel",approve=True,restock_details=[1])
     empty="2020-03-01"
     action(gestion,"gestion.cash_day",dict(day=empty,expected_day="2020-02-29"))
     assert not snapshot()["service_requests"]["cancellations"]
@@ -156,14 +159,17 @@ def run():
     action(inv,"pedidos.save",dict(table_number=11,lines=details(6,6)))
     act("send")
     deliver(next(r for r in snapshot()["preparation"] if r["order_id"]==order()["id"]))
-    assert act("void_sale",reason="Anular antes del cobro")["void_cents"]==0
-    assert order()["status"]=="Anulada" and not order()["paid_at"]
+    rechazado(ValueError,lambda: act("void_sale",reason="Anular antes del cobro"))
+    act("request_cancel",reason="Anular antes del cobro")
+    act("decide_cancel",approve=True,restock_details=[])
+    assert order()["status"]=="Cancelado" and not order()["paid_at"]
     action(inv,"pedidos.save",dict(table_number=11,lines=details(6)))
     act("send")
     deliver(next(r for r in snapshot()["preparation"] if r["order_id"]==order()["id"]))
     act("pay",expected_cents=500)
     before=lot_balances()
-    act("refund",product_id=6,qty=1,reason="Sin reposición",restock=[])
+    act("refund_order",whole=True,expected_day="2020-02-29",reason="Sin reposición",
+        details=[dict(detail_no=1,qty=1,restock=False)])
     assert lot_balances()==before and order()["status"]=="Devuelto"
     print("Cobro parcial con cierre, anulación antes y después del pago y devolución directa verificados.")
     print("Registro persistente, reapertura, permisos y conflicto entre jornadas verificados.")

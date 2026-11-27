@@ -85,21 +85,30 @@ def _price(db, item_id):
     return row[0] if row else 0
 
 
+def _receipt_cost(receipt):
+    if receipt["approved_m"] is None:
+        return 0,_amount(receipt["qty_m"],receipt["unit_cents"]) if receipt["line_id"] is not None else 0
+    spent=_amount(receipt["approved_m"],receipt["unit_cents"])
+    pending=(receipt["qty_m"]-receipt["approved_m"]) if receipt["line_id"] is not None and receipt["pending_issue"] else 0
+    return spent,_amount(pending,receipt["unit_cents"])
+
+
 def budget(db):
     opening = _one(db, "SELECT opening_cents FROM g_settings WHERE id=1")[0]
     sales = inv.net_sales(db)
     spent = committed = issued = 0
-    for r in db.execute("""SELECT r.qty_m,r.approved_m,r.unit_cents,r.line_id,l.physical
-                           FROM g_receipts r LEFT JOIN inv_lots l ON r.lot_id=l.id"""):
-        if r["approved_m"] is not None:
-            spent += _amount(r["approved_m"], r["unit_cents"])
-            if r["physical"] is not None:
-                # Redondear el consumo neto de cada lote una sola vez, incluidas sus devoluciones.
-                issued += _amount(r["approved_m"]-r["physical"],r["unit_cents"])
-        elif r["line_id"] is not None:
-            committed += _amount(r["qty_m"], r["unit_cents"])
+    for r in db.execute("""SELECT r.qty_m,r.approved_m,r.unit_cents,r.line_id,l.physical,
+                           CASE WHEN i.id IS NOT NULL AND i.closed IS NULL THEN 1 ELSE 0 END AS pending_issue
+                           FROM g_receipts r LEFT JOIN inv_lots l ON r.lot_id=l.id
+                           LEFT JOIN g_incidents i ON i.receipt_id=r.id"""):
+        accepted,pending=_receipt_cost(r)
+        spent+=accepted
+        committed+=pending
+        if r["approved_m"] is not None and r["physical"] is not None:
+            issued+=_amount(r["approved_m"]-r["physical"],r["unit_cents"])
+    other=_one(db,"SELECT COALESCE(SUM(cents),0) FROM cash_expenses WHERE purchase_id IS NULL AND void_at IS NULL")[0]
     return dict(opening_cents=opening, sales_cents=sales, spent_cents=spent,
-                committed_cents=committed, available_cents=opening+sales-spent-committed,
+                committed_cents=committed, other_expenses_cents=other, available_cents=opening+sales-spent-committed-other,
                 issues_cents=issued)
 
 
@@ -147,6 +156,7 @@ def _receive(db, user, p):
     if r["line_id"]:
         purchase = _one(db, "SELECT purchase_id FROM g_lines WHERE id=?", r["line_id"])[0]
         _sync_purchase_receipt_state(db,purchase)
+        _sync_purchase_expense(db,purchase,user["name"])
     return r["id"]
 
 
@@ -165,18 +175,19 @@ def _resolve(db, user, p):
     admit = _flag(p) if "approve" in p else True
     resolution = _text(p.get("resolution"), "motivo de la decisión", 500)
     at=stamp()
+    receipt=_one(db,"SELECT * FROM g_receipts WHERE id=?",issue["receipt_id"])
     if not admit:
-        receipt=_one(db,"SELECT * FROM g_receipts WHERE id=?",issue["receipt_id"])
         remaining=receipt["qty_m"]-receipt["approved_m"]
         if remaining:
             db.execute("""INSERT INTO g_receipts(item_id,line_id,supplier,qty_m,unit_cents,created,actor)
                           VALUES(?,?,?,?,?,?,?)""",(receipt["item_id"],receipt["line_id"],receipt["supplier"],
                           remaining,receipt["unit_cents"],at,user["name"]))
-            if receipt["line_id"]:
-                purchase=_one(db,"SELECT purchase_id FROM g_lines WHERE id=?",receipt["line_id"])[0]
-                _sync_purchase_receipt_state(db,purchase)
     db.execute("UPDATE g_incidents SET decision=?,resolution=?,closed=?,closer=? WHERE id=?",
                (admit,resolution,at,user["name"],issue["id"]))
+    if receipt["line_id"]:
+        purchase=_one(db,"SELECT purchase_id FROM g_lines WHERE id=?",receipt["line_id"])[0]
+        _sync_purchase_receipt_state(db,purchase)
+        _sync_purchase_expense(db,purchase,user["name"])
     return issue["id"]
 
 
@@ -387,6 +398,7 @@ def _edit_sent_purchase(db,user,purchase,p,supplier):
             db.execute("""INSERT INTO g_receipts(item_id,line_id,supplier,qty_m,unit_cents,created,actor)
                           VALUES(?,?,?,?,?,?,?)""",(item_id,line_id,supplier,remaining,cost,at,user["name"]))
     _sync_purchase_receipt_state(db,pid)
+    _sync_purchase_expense(db,pid,user["name"])
 
 
 def _decide(db, user, p):
@@ -398,10 +410,7 @@ def _decide(db, user, p):
     _check_purchase_version(purchase,p)
     approve = _flag(p)
     if approve:
-        if not purchase["supplier"]:
-            raise ValueError("Indica el proveedor antes de aprobar la compra.")
-        if db.execute("SELECT 1 FROM g_lines WHERE purchase_id=? AND unit_cents=0",(purchase["id"],)).fetchone():
-            raise ValueError("Completa la cotización de todos los insumos antes de aprobar.")
+        _check_purchase_funds(db,_quoted_purchase(db,purchase))
     db.execute("UPDATE g_purchases SET status=?,reviewed_at=?,reviewer=?,version=version+1 WHERE id=?",
                ("Aprobada" if approve else "Rechazada",stamp(),user["name"],purchase["id"]))
     return purchase["id"]
@@ -430,13 +439,22 @@ def _dispatch(db, user, p):
     return purchase["id"]
 
 
-def _dispatch_purchase(db,user,purchase):
+def _quoted_purchase(db,purchase):
     lines = list(db.execute("SELECT * FROM g_lines WHERE purchase_id=?",(purchase["id"],)))
     if not purchase["supplier"] or not lines or any(not r["unit_cents"] for r in lines):
         raise ValueError(f"Completa el proveedor y la cotización en {inv.public('OC',purchase['id'])}.")
+    return lines
+
+
+def _check_purchase_funds(db,lines):
     cost = sum(_amount(r["qty_m"],r["unit_cents"]) for r in lines)
     if cost > budget(db)["available_cents"]:
-        raise ValueError("Saldo insuficiente para cursar esta compra. Revisa el presupuesto disponible.")
+        raise ValueError("Saldo insuficiente para esta compra. Revisa el presupuesto disponible.")
+
+
+def _dispatch_purchase(db,user,purchase):
+    lines=_quoted_purchase(db,purchase)
+    _check_purchase_funds(db,lines)
     at = stamp()
     db.executemany("""INSERT INTO g_receipts(item_id,line_id,supplier,qty_m,unit_cents,created,actor)
                       VALUES(?,?,?,?,?,?,?)""",
@@ -444,6 +462,7 @@ def _dispatch_purchase(db,user,purchase):
     db.execute("""UPDATE g_purchases SET status='Enviada',sent_at=?,sender=?,version=version+1,
                   reviewed_at=COALESCE(reviewed_at,?),reviewer=COALESCE(reviewer,?) WHERE id=?""",
                (at,user["name"],at,user["name"],purchase["id"]))
+    _sync_purchase_expense(db,purchase["id"],user["name"],day=inv.business_day(db))
 
 
 def _send_purchase_list(db,user,p):
@@ -576,6 +595,49 @@ def _next_cash_expense_number(db,day):
     return db.execute("SELECT COALESCE(MAX(receipt_no),0)+1 FROM cash_expenses WHERE day=?",(day,)).fetchone()[0]
 
 
+def _insert_cash_expense(db,day,kind,reference,concept,amount,actor,*,purchase_id=None):
+    number=_next_cash_expense_number(db,day)
+    receipt=db.execute("""INSERT INTO cash_expenses(day,receipt_no,kind,reference,concept,cents,actor,purchase_id)
+                         OUTPUT INSERTED.id VALUES(?,?,?,?,?,?,?,?)""",
+                       (day,number,kind,reference,concept,amount,actor,purchase_id)).lastrowid
+    return {"id":receipt,"code":inv.public("BL",number)}
+
+
+def _sync_purchase_expense(db,purchase_id,actor,*,day=None,reconcile=False):
+    linked=db.execute("SELECT id,cents,void_at FROM cash_expenses WHERE purchase_id=?",(purchase_id,)).fetchone()
+    receipts=db.execute("""SELECT r.qty_m,r.approved_m,r.unit_cents,r.line_id,
+                           CASE WHEN i.id IS NOT NULL AND i.closed IS NULL THEN 1 ELSE 0 END AS pending_issue
+                           FROM g_receipts r JOIN g_lines l ON l.id=r.line_id
+                           LEFT JOIN g_incidents i ON i.receipt_id=r.id WHERE l.purchase_id=?""",(purchase_id,))
+    amount=sum(sum(_receipt_cost(r)) for r in receipts)
+    if linked:
+        if not amount and not linked["void_at"]:
+            db.execute("""UPDATE cash_expenses SET void_at=?,void_reason=?,void_by=? WHERE id=?""",
+                       (inv.now(),"Compra sin importe recibido ni pendiente",actor,linked["id"]))
+        elif amount and (linked["cents"]!=amount or linked["void_at"]):
+            db.execute("""UPDATE cash_expenses SET cents=?,void_at=NULL,void_reason=NULL,void_by=NULL WHERE id=?""",
+                       (amount,linked["id"]))
+    elif amount:
+        if day is None:
+            purchase=_one(db,"SELECT sent_at FROM g_purchases WHERE id=?",purchase_id)
+            day=purchase["sent_at"][:10]
+        code=inv.public("OC",purchase_id)
+        if reconcile:
+            manual=db.execute("""UPDATE cash_expenses SET purchase_id=?
+                                 WHERE purchase_id IS NULL AND day=? AND kind='Mercado'
+                                   AND reference=? AND cents=? AND void_at IS NULL""",
+                              (purchase_id,day,code,amount))
+            if manual.rowcount:
+                return
+        _insert_cash_expense(db,day,"Mercado","","Compra enviada · "+code,amount,actor,purchase_id=purchase_id)
+
+
+def register_existing_purchase_expenses(db):
+    for r in db.execute("""SELECT id,sent_at,COALESCE(sender,actor) AS actor FROM g_purchases
+                           WHERE sent_at IS NOT NULL AND status IN ('Enviada','Recibida') ORDER BY sent_at,id"""):
+        _sync_purchase_expense(db,r["id"],r["actor"],day=r["sent_at"][:10],reconcile=True)
+
+
 def _record_cash_expense(db,user,payload,day):
     kind=payload.get("kind")
     if kind not in ("Personal","Mercado"):
@@ -586,11 +648,7 @@ def _record_cash_expense(db,user,payload,day):
         raise ValueError("La referencia ya está registrada para esta jornada.")
     concept=inv._text(payload.get("concept"),"concepto",300)
     amount=inv._scaled(payload.get("amount"),100,"Importe")
-    number=_next_cash_expense_number(db,day)
-    receipt=db.execute("""INSERT INTO cash_expenses(day,receipt_no,kind,reference,concept,cents,actor)
-                         OUTPUT INSERTED.id VALUES(?,?,?,?,?,?,?)""",
-                       (day,number,kind,reference,concept,amount,user["name"])).lastrowid
-    return {"id":receipt,"code":inv.public("BL",number)}
+    return _insert_cash_expense(db,day,kind,reference,concept,amount,user["name"])
 
 
 def act(db, user, action, payload):
@@ -625,9 +683,10 @@ def act(db, user, action, payload):
             raise ValueError("La jornada cambió. Actualiza Caja antes de continuar.")
         if action=="gestion.void_expense":
             reason=inv._text(payload.get("reason"),"motivo",300)
-            if not db.execute("UPDATE cash_expenses SET void_reason=?,void_by=?,void_at=? WHERE id=? AND day=? AND void_at IS NULL",
+            if not db.execute("""UPDATE cash_expenses SET void_reason=?,void_by=?,void_at=?
+                                  WHERE id=? AND day=? AND void_at IS NULL AND purchase_id IS NULL""",
                               (reason,user["name"],inv.now(),inv._id(payload.get("id")),day)).rowcount:
-                raise ValueError("El gasto ya fue anulado o no existe.")
+                raise ValueError("El gasto no se puede anular aquí. Los gastos de compra se ajustan en Compras y Recepción.")
             return {}
         return _record_cash_expense(db,user,payload,day)
     elif action in {"gestion.fund","gestion.schedule"}:

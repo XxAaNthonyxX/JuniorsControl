@@ -145,8 +145,8 @@ function ventasPeriodo(orders,start,end){
    const filters=`<form id="ventas-filtro" class="actions filters">${input("desde","Desde","date",from,"required")}${input("hasta","Hasta","date",to,"required")}<button class="btn primary">Consultar</button></form>`;
    const expenses=expensesFor(from,to);
    const count=cashResult(r.net,expenses);
-   const expenseRows=expenses.map(e=>[h(displayDate(e.day)),h(e.code),h(e.kind),h(e.reference||"—"),h(e.concept),money(e.cents),h(e.actor),
-     e.void_at?h("Anulado · "+e.void_reason+" · "+e.void_by):e.day!==S.today?"Registrado":button("Anular",()=>modal("Anular gasto · "+e.code,input("reason","Motivo","text","","required"),
+   const expenseRows=expenses.map(e=>[h(displayDate(e.day)),h(e.code),h(e.kind),h(e.purchase_id?"OC"+String(e.purchase_id).padStart(4,"0"):e.reference||"—"),h(e.concept),money(e.cents),h(e.actor),
+     e.void_at?h("Anulado · "+e.void_reason+" · "+e.void_by):e.purchase_id?"Automático · Compras":e.day!==S.today?"Registrado":button("Anular",()=>modal("Anular gasto · "+e.code,input("reason","Motivo","text","","required"),
        v=>run("gestion.void_expense",{id:e.id,day:e.day,reason:v.reason},"Gasto anulado")),"link")]);
    const methodOrder=new Set([...paymentMethods,"Sin especificar","Cambio",...r.collections.keys()]);
    const methods=[...methodOrder].map(method=>[method,r.collections.get(method)]).filter(([,amount])=>amount);
@@ -158,7 +158,7 @@ function ventasPeriodo(orders,start,end){
       panel("Arqueo de caja",`<div class="metrics">${metric("Ventas netas",money(r.net))}${metric("Personal",money(count.personal))}${metric("Mercado",money(count.market))}${metric(resultLabel(count.result),money(count.result))}</div>`+
         table(["Medio de pago","Cobros"],methods.map(([m,v])=>[h(m),money(v)]),"Sin cobros"),
         button("Calcular arqueo",()=>openCashCount(from,to),"primary"))+
-      panel("Gastos de caja",table(["Fecha","Boleta","Tipo","Referencia externa","Concepto","Importe","Responsable","Estado"],expenseRows,"Sin gastos"),button("Registrar gasto",addExpense,"primary"))+
+      panel("Gastos de caja",table(["Fecha","Boleta","Tipo","Referencia","Concepto","Importe","Responsable","Estado"],expenseRows,"Sin gastos"),button("Registrar gasto",addExpense,"primary"))+
       panel("Movimientos de caja",table(["Documento","Fecha de operación","Comanda","Mesa o referencia","Responsable","Importe","Acción"],records,"Sin cobros ni devoluciones en este período."),
             records.length?button("Descargar CSV",()=>downloadReport(r)):"")+
       panel("Ventas por producto",table(["Producto","Unidades cobradas","Devueltas","Importe neto"],products,"Sin productos en el período seleccionado."));

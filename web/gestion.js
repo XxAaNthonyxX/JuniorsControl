@@ -358,8 +358,9 @@
   function budgetCard(b) {
     return panel("Presupuesto de compras",stack(
       group(metric("Disponible",money(b.available_cents)), metric("Ventas netas",money(b.sales_cents)),
-        metric("Compras recibidas",money(b.spent_cents)),metric("Por recibir",money(b.committed_cents))),
-      note("Fondo inicial: "+money(b.opening_cents)+". Salidas de lotes con costo registrado: "+money(b.issues_cents)+". El costo se carga al recibir la compra.")),
+        metric("Compras recibidas",money(b.spent_cents)),metric("Comprometido",money(b.committed_cents)),
+        metric("Otros gastos de caja",money(b.other_expenses_cents))),
+      note("Disponible = fondo inicial + ventas netas − compras recibidas − compromisos − otros gastos de caja.")),
       button("Editar fondo",()=>modal("Fondo inicial",
         input("soles","Fondo de apertura (S/)","number",b.opening_cents/100,numberAttrs+" required")+
         note("Se reemplazará el fondo de apertura utilizado para calcular el saldo."),

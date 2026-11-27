@@ -16,7 +16,8 @@ class TestBoletasGastos(TestCase):
                 self.assertNotIn("void_at",query)
                 return Cursor((max(issued[args[0]],default=0)+1,))
             if query.startswith("INSERT INTO cash_expenses"):
-                day,number,kind,reference,concept,cents,actor=args
+                day,number,kind,reference,concept,cents,actor,purchase_id=args
+                self.assertIsNone(purchase_id)
                 self.assertEqual(reference,"")
                 self.assertEqual(cents,1050)
                 issued[day].append(number)

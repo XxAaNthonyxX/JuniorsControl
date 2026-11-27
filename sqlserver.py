@@ -140,6 +140,14 @@ def _aplicar_v21(db):
         db.execute(batch)
 
 
+def _aplicar_v22(db):
+    from gestion import register_existing_purchase_expenses
+
+    for batch in (ROOT/"sql/gastos_compras_v22.sql").read_text(encoding="utf8").split("\nGO\n"):
+        db.execute(batch)
+    register_existing_purchase_expenses(db)
+
+
 def preparar(db):
     if db.execute("SELECT DB_ID()").fetchone()[0] <= 4:
         raise ValueError("Elige una base exclusiva de JuniorsControl.")
@@ -205,8 +213,11 @@ def preparar(db):
             version = 20
         if version == 20:
             _aplicar_v21(db)
-            return
+            version = 21
         if version == 21:
+            _aplicar_v22(db)
+            return
+        if version == 22:
             return
         if version != 2:
             raise ValueError("Versión de esquema incompatible.")
@@ -236,3 +247,4 @@ def preparar(db):
     db.execute((ROOT/"sql/anular_cobradas_v19.sql").read_text(encoding="utf8"))
     db.execute((ROOT/"sql/envio_lotes_v20.sql").read_text(encoding="utf8"))
     _aplicar_v21(db)
+    _aplicar_v22(db)

@@ -178,8 +178,11 @@ def preparar(db):
             version = 14
         if version == 14:
             db.execute((ROOT/"sql/pagos_mixtos_v15.sql").read_text(encoding="utf8"))
-            return
+            version = 15
         if version == 15:
+            db.execute((ROOT/"sql/lotes_compras_v16.sql").read_text(encoding="utf8"))
+            return
+        if version == 16:
             return
         if version != 2:
             raise ValueError("Versión de esquema incompatible.")
@@ -203,3 +206,4 @@ def preparar(db):
     db.execute((ROOT/"sql/areas_insumos_v13.sql").read_text(encoding="utf8"))
     _aplicar_v14(db)
     db.execute((ROOT/"sql/pagos_mixtos_v15.sql").read_text(encoding="utf8"))
+    db.execute((ROOT/"sql/lotes_compras_v16.sql").read_text(encoding="utf8"))

@@ -129,21 +129,32 @@
     ]),"Aún no se han reportado mermas."),button("Reportar merma",newWaste,"primary"));
   };
 
-  function purchaseForm(p) {
+  const purchaseDayOf = purchase => purchase.purchase_day || purchase.created.slice(0,10);
+  const purchaseLotCode = day => "LC-"+day.replaceAll("-","");
+  let selectedPurchaseDay="";
+
+  function purchaseForm(p, {day=S.calendar_today||S.today, source=null}={}) {
     const current=new Map((p?.lines||[]).map(x=>[x.item_id,x]));
-    const options=admin()?rows("items").map(x=>({item_id:x.id,name:x.name,unit:x.unit})):
+    const options=admin()?rows("items").map(x=>({
+      item_id:x.id,name:x.name,unit:x.unit,available:x.available,minimum:x.min_qty,
+      critical:x.available<=x.min_qty,
+    })).sort((a,b)=>Number(b.critical)-Number(a.critical)||a.name.localeCompare(b.name,"es")):
       p.lines.map(x=>({item_id:x.item_id,name:x.item_name,unit:x.unit}));
     const delegables=[["","Sin asignar"],...rows("users").filter(x=>x.active).map(x=>[x.id,x.name])];
-    const assigned=admin()?select("assignee_id","Responsable delegado",delegables,p?.assignee_id||""):"";
-    const lines = table(["Insumo","Cantidad","S/ por unidad"],options.map(x=>{
+    const assigned=admin()?select("assignee_id","Responsable delegado",delegables,p?.assignee_id||source?.assignee_id||""):"";
+    const headers=admin()?["Insumo","Existencias","Cantidad","S/ por unidad"]:["Insumo","Cantidad","S/ por unidad"];
+    const lines = table(headers,options.map(x=>{
       const line=current.get(x.item_id);
       const n=x.item_id;
       return [e(x.name)+sub(x.unit),
+        ...(admin()?[badge(x.critical?"Crítico":"Normal")+sub(`${fmt(x.available)} disponibles · mínimo ${fmt(x.minimum)}`)]:[]),
         '<input aria-label="Cantidad de '+e(x.name)+'" name="q'+n+'" type="number" min="0" step="0.001" value="'+e(line?.qty||"")+'" style="width:7em">',
         '<input aria-label="Costo de '+e(x.name)+'" name="c'+n+'" type="number" min="0" step="0.01" value="'+e(line?line.unit_cents/100:"")+'" style="width:7em">'];
     }),"Agrega insumos al inventario para preparar la compra.");
-    modal(p?"Editar "+p.code:"Nueva hoja de compra",
-      input("supplier","Proveedor","text",p?.supplier||"","maxlength=100")+assigned+
+    const lotDay=p?purchaseDayOf(p):source?purchaseDayOf(source):day;
+    modal(p?"Editar "+p.code:source?"Ampliar "+source.code:"Nueva hoja de compra",
+      note(`Lote ${purchaseLotCode(lotDay)} · ${date(lotDay)}`)+
+      input("supplier","Proveedor","text",p?.supplier||source?.supplier||"","maxlength=100")+assigned+
       '<div class="full">'+note("Completa la cantidad y el costo unitario de los insumos que deseas comprar.")+lines+'</div>',
       v=>{
         const details=options.filter(x=>Number(v["q"+x.item_id])>0).map(x=>({
@@ -152,6 +163,8 @@
         const payload={supplier:v.supplier,lines:details};
         if (admin()) payload.assignee_id=v.assignee_id;
         if (p) { payload.id=p.id; payload.version=p.version; }
+        else payload.purchase_day=lotDay;
+        if (source) payload.source_purchase_id=source.id;
         return run(p?"gestion.edit_purchase":"gestion.purchase",payload,"Hoja de compra guardada");
       },"Guardar hoja");
   }
@@ -160,7 +173,9 @@
     const details=table(["Insumo","Cantidad","Costo unitario","Importe"],p.lines.map(l=>[
       e(l.item_name),e(fmt(l.qty)+" "+l.unit),e(money(l.unit_cents)),e(money(l.total_cents))]),"Sin renglones.");
     modal("Detalle de "+p.code,'<div class="full">'+note((p.supplier||"Proveedor pendiente")+" · "+p.status)+
-      details+note("Total: "+money(p.total_cents))+button("Descargar hoja de compra",()=>downloadPurchase(p))+'</div>',null);
+      details+note("Total "+money(p.total_cents))+
+      actions(button("Exportar PDF",()=>printPurchases(purchaseDayOf(p),[p],p.code),"primary"),
+        button("Exportar CSV",()=>downloadPurchase(p)))+'</div>',null);
   }
 
   function downloadPurchase(p) {
@@ -171,6 +186,36 @@
       ["Total (S/)","","","",(p.total_cents/100).toFixed(2)]
     ];
     exportCsv(p.code+".csv",sheet);
+  }
+
+  function printPurchases(day, purchases, code=purchaseLotCode(day)) {
+    const output=document.createElement("section");
+    output.id="purchase-print";
+    const wholeLot=code===purchaseLotCode(day);
+    const total=purchases.reduce((sum,p)=>sum+p.total_cents,0);
+    const orders=purchases.map(p=>`<section class="purchase-print-order">
+      ${wholeLot?`<h2>Hoja ${e(p.code)}</h2>`:""}
+      <p>${e(p.supplier||"Proveedor por definir")} · ${e(p.status)} · Revisión ${e(p.version)}</p>
+      ${table(["Insumo","Unidad","Cantidad","S/ por unidad","Importe"],p.lines.map(l=>[
+        e(l.item_name),e(l.unit),e(fmt(l.qty)),e(money(l.unit_cents)),e(money(l.total_cents)),
+      ]),"Esta hoja no contiene insumos.")}
+      ${purchases.length>1?`<p class="purchase-print-total">Subtotal <strong>${e(money(p.total_cents))}</strong></p>`:""}
+    </section>`).join("");
+    output.innerHTML=`<header class="purchase-print-heading">
+      <p>Juniors · Pollos y parrillas</p>
+      <h1>${wholeLot?"Lote de compras":"Hoja de compra"} ${e(code)}</h1>
+      <p>${wholeLot?"":`Lote ${e(purchaseLotCode(day))} · `}${e(date(day))}</p>
+    </header>${orders}<p class="purchase-print-total purchase-print-grand">Total <strong>${e(money(total))}</strong></p>`;
+    const oldTitle=document.title;
+    document.body.append(output);
+    document.body.classList.add("printing-purchase");
+    document.title=code;
+    window.addEventListener("afterprint",()=>{
+      output.remove();
+      document.body.classList.remove("printing-purchase");
+      document.title=oldTitle;
+    },{once:true});
+    window.print();
   }
 
   function purchaseActions(p) {
@@ -188,7 +233,9 @@
       button("Cursar compra",()=>confirmAction("Cursar "+p.code,
       "Se comprometerán "+money(p.total_cents)+" y se crearán las recepciones esperadas. Entrega la orden a "+p.supplier+" por el canal acordado.",
       "dispatch",{id:p.id,version:p.version},"Cursar compra","Compra cursada; recepciones generadas")));
-    return info;
+    const supplement=["Enviada","Recibida"].includes(p.status)?
+      button("Agregar insumos",()=>purchaseForm(null,{source:p})):"";
+    return actions(info,supplement);
   }
 
   function budgetCard(b) {
@@ -212,11 +259,18 @@
 
   pages.compras = () => {
     const purchases=rows("purchases");
+    const today=S.calendar_today||S.today;
+    const days=[...new Set([today,...purchases.map(purchaseDayOf)])].sort().reverse();
+    const day=days.includes(selectedPurchaseDay)?selectedPurchaseDay:today;
+    const lot=purchases.filter(p=>purchaseDayOf(p)===day);
+    const period=`<div class="actions filters">${select("purchase_day","Lote diario",days.map(d=>[
+      d,date(d)+" · "+purchaseLotCode(d),
+    ]),day)}${lot.length?button("Exportar lote en PDF",()=>printPurchases(day,lot)):""}</div>`;
     const procurement=panel(admin()?"Hojas de compra":"Hojas de compra delegadas",
-      table(["Orden","Proveedor","Responsable","Total","Estado",""],purchases.map(p=>[
+      period+table(["Orden","Proveedor","Responsable","Total","Estado",""],lot.map(p=>[
         e(p.code)+sub(when(p.created)),e(p.supplier||"Por definir")+sub(p.origin),e(p.assignee||"Administración"),
         e(money(p.total_cents)),badge(p.status),purchaseActions(p)
-      ]),"Todavía no hay hojas de compra."),admin()?button("Nueva compra",()=>purchaseForm(null),"primary"):"");
+      ]),"Este lote todavía no tiene hojas de compra."),admin()?button("Nueva compra",()=>purchaseForm(null,{day}),"primary"):"");
     if (!admin()) return procurement;
     const reports=panel("Informes de faltantes",
       '<p class="muted">Conteo diario a las '+e(S.schedule)+' (Lima), mientras la aplicación esté en ejecución.</p>'+
@@ -232,6 +286,13 @@
           "report",{},"Generar informe","Informe generado"))));
     return stack(budgetCard(S.budget),procurement,reports);
   };
+  document.addEventListener("change",event=>{
+    if(route==="compras"&&event.target.name==="purchase_day"){
+      selectedPurchaseDay=event.target.value===(S.calendar_today||S.today)?"":event.target.value;
+      render();
+      document.querySelector('#view [name="purchase_day"]')?.focus();
+    }
+  });
 
   function configureAlerts() {
     const fields=select("item_id","Insumo",itemOptions())+

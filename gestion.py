@@ -254,8 +254,21 @@ def _purchase(db, user, p):
     lines = _lines(db,p.get("lines"))
     supplier = _text(p.get("supplier",""), "proveedor", 100, optional=True)
     delegate = _assignee(db,p.get("assignee_id"))
-    cur = db.execute("""INSERT INTO g_purchases(origin,created,actor,supplier,assignee_id,status) OUTPUT INSERTED.id
-                        VALUES('Manual',?,?,?,?,'Borrador')""",(stamp(),user["name"],supplier,delegate))
+    created = stamp()
+    origin = "Manual"
+    if p.get("source_purchase_id"):
+        source = _one(db,"SELECT * FROM g_purchases WHERE id=?",
+                      _int(p["source_purchase_id"],"compra de origen",1))
+        if source["status"] not in ("Enviada","Recibida"):
+            raise ValueError("La hoja de origen debe estar cursada o recibida.")
+        day = source["purchase_day"] or source["created"][:10]
+        origin = "Ampliación de " + inv.public("OC",source["id"])
+    else:
+        day = inv._date(p.get("purchase_day",created[:10]))
+        if day > created[:10]:
+            raise ValueError("Selecciona hoy o una fecha anterior para el lote de compra.")
+    cur = db.execute("""INSERT INTO g_purchases(origin,created,actor,supplier,assignee_id,status,purchase_day) OUTPUT INSERTED.id
+                        VALUES(?,?,?,?,?,'Borrador',?)""",(origin,created,user["name"],supplier,delegate,day))
     _put_lines(db,cur.lastrowid,lines)
     return cur.lastrowid
 
@@ -369,8 +382,8 @@ def _report(db, actor, scheduled, stocks=None, at=None):
         lines.append((item["id"],suggested,_price(db,item["id"])))
     purchase_id = None
     if lines:
-        purchase_id = db.execute("""INSERT INTO g_purchases(origin,created,actor,supplier,status) OUTPUT INSERTED.id
-                                    VALUES('Faltantes',?,?,'','Borrador')""",(created,actor)).lastrowid
+        purchase_id = db.execute("""INSERT INTO g_purchases(origin,created,actor,supplier,status,purchase_day) OUTPUT INSERTED.id
+                                    VALUES('Faltantes',?,?,'','Borrador',?)""",(created,actor,day)).lastrowid
         _put_lines(db,purchase_id,lines)
     report_id = db.execute("INSERT INTO g_reports(day,created,scheduled,purchase_id) OUTPUT INSERTED.id VALUES(?,?,?,?)",
                            (day,created,int(scheduled),purchase_id)).lastrowid
@@ -554,6 +567,7 @@ def state(db, user):
     purchases = {}
     for r in db.execute(query+" ORDER BY p.id DESC",args):
         purchase = _with_code(r,"OC")
+        purchase["purchase_day"] = purchase["purchase_day"] or purchase["created"][:10]
         purchase.update(lines=[], total_cents=0)
         purchases[r["id"]] = purchase
     if purchases:

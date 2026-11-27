@@ -57,7 +57,7 @@ function exportCsv(filename,rows){
  document.body.append(link);link.click();link.remove();
  setTimeout(()=>URL.revokeObjectURL(url),1000);
 }
-function badge(text){const tone=/^(?:Cobrado|Aprobada|Recibida|Resuelta|Disponible|Activo|Activa)$/i.test(text)?"green":/^(?:Pendiente|Por revisar|Reservado|Parcial|Stock mínimo)$/i.test(text)?"amber":"";return `<span class="badge ${tone}">${h(text)}</span>`}
+function badge(text){const tone=/^(?:Cobrado|Aprobada|Recibida|Resuelta|Disponible|Activo|Activa)$/i.test(text)?"green":/^(?:Pendiente|Por revisar|Reservado|Parcial|Stock mínimo|Crítico)$/i.test(text)?"amber":"";return `<span class="badge ${tone}">${h(text)}</span>`}
 let callbacks=new Map(), seq=0;
 function bind(fn){const id=String(++seq); callbacks.set(id,fn);return `data-act="${id}"`}
 function button(label,fn,kind="secondary"){return `<button type="button" class="btn ${h(kind)}" ${bind(fn)}>${h(label)}</button>`}

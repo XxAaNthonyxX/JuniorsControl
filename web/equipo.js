@@ -46,10 +46,16 @@
   function invitePerson(record = {}) {
     const fields = input("email", "Correo de la persona", "email", record.email || "",
       'required maxlength="254" autocomplete="off"') + assignmentFields(record)
-      + '<p class="muted full">Junior’s enviará un enlace de activación y un código de 6 dígitos válido por 24 horas. Al reenviar, el código anterior caduca.</p>';
+      + '<p class="muted full">Si la cuenta ya está activa, la persona recibirá un enlace para iniciar sesión. Si está pendiente, se enviará un código nuevo de 6 dígitos válido por 24 horas.</p>';
     const dialog = modal(record.email ? "Reenviar invitación" : "Invitar a una persona", fields,
       values => run("invite", values, "Invitación enviada por Gmail."), "Enviar invitación");
     configureAssignment(dialog, record);
+  }
+
+  function resendAccess(person) {
+    modal("Reenviar enlace de acceso",
+      "<p>Enviaremos a <strong>" + h(person.email) + "</strong> un enlace para entrar con su cuenta actual.</p>",
+      () => run("invite", {email: person.email}, "Enlace de acceso reenviado."), "Reenviar enlace");
   }
 
   function editPerson(person) {
@@ -73,6 +79,7 @@
       '<strong>' + h(person.name) + '</strong><br><span class="muted">' + h(person.code) + '</span>',
       h(person.email), h(roleNames[person.role] || person.role), h(person.area || "—"),
       badge(person.active ? "Activa" : "Desactivada"), button("Editar", () => editPerson(person))
+        + (smtp.configured && person.active ? " " + button("Reenviar enlace", () => resendAccess(person)) : "")
         + (person.id === S.user.id ? "" : " " + button("Eliminar", () => deletePerson(person)))
     ]);
     const pending = (S.invitations || []).map(record => [

@@ -232,8 +232,9 @@ class Handler(BaseHTTPRequestHandler):
                 if action in acceso.ACTIONS:
                     links = self.server.network_info["urls"]
                     origin = self.server.network_info["public_url"] or (links[0] if links else "https://" + self.headers["Host"])
+                    login_url = origin + "/"
                     try:
-                        result = acceso.act(db,user,action,{**p,"_token":session,"_activation_url":origin+"/#activar"})
+                        result = acceso.act(db,user,action,{**p,"_token":session,"_login_url":login_url,"_activation_url":login_url+"#activar"})
                     except acceso.InvalidCode as exc:
                         # Confirmar el contador de intentos también cuando se rechaza el código.
                         result = {"error": str(exc)}

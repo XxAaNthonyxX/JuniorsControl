@@ -187,20 +187,12 @@ def _smtp_save(db, payload):
     return {"message": "Configuración de Gmail guardada."}
 
 
-def _send_code(sender, protected, recipient, code, *, recovery=False, activation_url=None):
+def _send_email(sender, protected, recipient, subject, body):
     password = _windows_secret(protected, protect=False).decode("ascii")
     message = EmailMessage()
-    message["Subject"] = "Recuperar contraseña de JuniorsControl" if recovery else "Tu código de verificación de JuniorsControl"
+    message["Subject"] = subject
     message["From"] = sender
     message["To"] = recipient
-    if recovery:
-        body = f"Tu código para cambiar la contraseña es {code}. Vence en 15 minutos. Si no lo solicitaste, puedes ignorar este correo."
-    else:
-        body = f"Tu código de registro es {code}. Es válido durante 24 horas."
-        if activation_url:
-            body += f"\n\nConéctate a la red indicada por Administración y abre este enlace para activar tu cuenta:\n{activation_url}"
-        else:
-            body += "\n\nIntroduce el código en la pantalla de creación de tu cuenta."
     message.set_content(body)
     try:
         with smtplib.SMTP_SSL("smtp.gmail.com", 465, timeout=12, context=ssl.create_default_context()) as smtp:
@@ -208,10 +200,24 @@ def _send_code(sender, protected, recipient, code, *, recovery=False, activation
             smtp.send_message(message)
     except smtplib.SMTPAuthenticationError:
         raise ValueError("Gmail rechazó las credenciales. Revisa la dirección y la contraseña de aplicación, "
-                         "guarda los cambios y reenvía la invitación.") from None
+                         "guarda los cambios y vuelve a intentar el envío.") from None
     except (smtplib.SMTPException, OSError):
         raise ValueError("Gmail no confirmó el envío. Revisa la conexión, el remitente y el destinatario, "
-                         "y vuelve a enviar la invitación.") from None
+                         "y vuelve a intentar el envío.") from None
+
+
+def _send_code(sender, protected, recipient, code, *, recovery=False, activation_url=None):
+    if recovery:
+        subject = "Recuperar contraseña de JuniorsControl"
+        body = f"Tu código para cambiar la contraseña es {code}. Vence en 15 minutos. Si no lo solicitaste, puedes ignorar este correo."
+    else:
+        subject = "Tu código de verificación de JuniorsControl"
+        body = f"Tu código de registro es {code}. Es válido durante 24 horas."
+        if activation_url:
+            body += f"\n\nConéctate a la red indicada por Administración y abre este enlace para activar tu cuenta:\n{activation_url}"
+        else:
+            body += "\n\nIntroduce el código en la pantalla de creación de tu cuenta."
+    _send_email(sender, protected, recipient, subject, body)
 
 
 class InvalidCode(ValueError):
@@ -278,12 +284,21 @@ def _reset_password(db, payload):
 
 def _invite(db, payload):
     email = _email(payload)
-    role, area = _role_area(payload)
-    if db.execute("SELECT 1 FROM users WHERE email=?", (email,)).fetchone():
-        raise ValueError("Ya existe una cuenta con este correo.")
+    account = db.execute("SELECT active FROM users WHERE email=? AND deleted=0", (email,)).fetchone()
+    if account and not account["active"]:
+        raise ValueError("Activa la cuenta desde Equipo antes de reenviar el enlace.")
     smtp = db.execute("SELECT email,protected FROM auth_smtp WHERE id=1").fetchone()
     if not smtp:
         raise ValueError("Configura primero el remitente de Gmail.")
+    if account:
+        login_url = payload.get("_login_url")
+        if not login_url:
+            raise ValueError("Abre Equipo y correo en JuniorsControl para reenviar el enlace.")
+        body = (f"Entra a JuniorsControl con el correo {email} y tu contraseña habitual:\n{login_url}\n\n"
+                "Si olvidaste tu contraseña, selecciona «Recuperar contraseña» al iniciar sesión.")
+        return {"message": "Enlace de acceso reenviado.",
+                "_send_invite": lambda: _send_email(smtp["email"], smtp["protected"], email, "Tu acceso a JuniorsControl", body)}
+    role, area = _role_area(payload)
     code = _new_code()
     db.execute("DELETE FROM auth_invites WHERE email=?", (email,))
     db.execute("INSERT INTO auth_invites(email,role,area,digest,expires_at) VALUES(?,?,?,?,?)",

@@ -75,19 +75,48 @@ def allows_decimal(name):
     return bool(re.search(r"\b(?:papas?|arroz)\b",name,re.IGNORECASE))
 
 
-def check_item_quantity(name, amount, previous=None):
-    if amount % 1000 and amount != previous and not allows_decimal(name):
-        raise ValueError(f"{name}: ingresa una cantidad entera. Los decimales se permiten para papa y arroz.")
+def potato_quantity_step(name, unit):
+    if not re.search(r"\bpapas?\b", name, re.IGNORECASE):
+        return 0
+    key=unit.strip().casefold()
+    if SMALL_STOCK_UNITS.get(key)=="g":
+        return 500
+    return 500_000 if key in ("g","gramo","gramos") else 0
+
+
+def quantity_measure(item):
+    if item is not None and "display_unit_milli" in item.keys() and item["display_unit_milli"]:
+        return item["display_unit"],item["display_unit_milli"]
+    return None,0
+
+
+def check_item_quantity(name, amount, previous=None, *, unit="", item=None):
+    if amount == previous:
+        return amount
+    potato_step=potato_quantity_step(name, unit)
+    if potato_step and amount % potato_step:
+        raise ValueError(f"{name}: ingresa una cantidad en incrementos de 0,5 kg.")
+    display,size=quantity_measure(item)
+    if size and amount % size:
+        raise ValueError(f"{name}: ingresa una cantidad entera de {display}.")
+    if not size and not potato_step and amount % 1000 and not allows_decimal(name):
+        raise ValueError(f"{name}: ingresa una cantidad entera.")
     return amount
 
 
-def item_quantity(name, value, label="Cantidad", *, unit="", minimum=1, previous=None):
+def item_quantity(name, value, label="Cantidad", *, unit="", minimum=1, previous=None, item=None):
     if isinstance(value,dict):
-        smaller_unit=None if allows_decimal(name) else SMALL_STOCK_UNITS.get(unit.strip().casefold())
-        if not smaller_unit or value.get("unit")!=smaller_unit:
+        display,size=quantity_measure(item)
+        if not size and not allows_decimal(name):
+            display=SMALL_STOCK_UNITS.get(unit.strip().casefold())
+            size=1
+        if not display or value.get("unit")!=display or value.get("unit_milli",1)!=size:
             raise ValueError(f"{name}: revisa la unidad de la cantidad indicada.")
-        return _scaled(value.get("value"),1,label,minimum)
-    return check_item_quantity(name,_scaled(value,1000,label,minimum),previous)
+        amount=_scaled(value.get("value"),1,label,minimum,1_000_000_000//size)*size
+        if potato_quantity_step(name,unit):
+            check_item_quantity(name,amount,unit=unit,item=item)
+        return amount
+    return check_item_quantity(name,_scaled(value,1000,label,minimum),previous,unit=unit,item=item)
 
 
 def num(x):
@@ -256,7 +285,7 @@ def stock(db):
     result = []
     rows = db.execute("""SELECT i.*,COALESCE(SUM(l.physical),0) AS physical,COALESCE(SUM(l.reserved),0) AS reserved,
                          COALESCE(SUM(CASE WHEN l.expiry IS NULL OR l.expiry>=? THEN l.physical-l.reserved ELSE 0 END),0) AS available
-                         FROM inv_items i LEFT JOIN inv_lots l ON l.item_id=i.id GROUP BY i.id,i.code,i.name,i.category,i.area,i.unit,i.min_qty,i.warn_days,i.perishable,i.transformable ORDER BY i.name""",
+                         FROM inv_items i LEFT JOIN inv_lots l ON l.item_id=i.id GROUP BY i.id,i.code,i.name,i.category,i.area,i.unit,i.min_qty,i.warn_days,i.perishable,i.transformable,i.display_unit,i.display_unit_milli ORDER BY i.name""",
                       (today(),))
     for row in rows:
         item = dict(row)
@@ -305,7 +334,7 @@ def _save_item(db, user, p):
     fields = [_text(p.get("name"),"nombre",100), _text(p.get("category"),"categoría",60),
               _item_area(p.get("area")), _text(p.get("unit"),"unidad",20)]
     item=_item(db,p["id"]) if p.get("id") else None
-    fields += [item_quantity(fields[0],p.get("min_qty",0),"Stock mínimo",unit=fields[3],minimum=0,
+    fields += [item_quantity(fields[0],p.get("min_qty",0),"Stock mínimo",unit=fields[3],minimum=0,item=item,
                             previous=item["min_qty"] if item else None),
                _scaled(p.get("warn_days",3),1,"Días de aviso",0,3650),
                _bool(p.get("perishable")), _bool(p.get("transformable"))]
@@ -322,6 +351,8 @@ def _save_item(db, user, p):
         if db.execute("SELECT 1 FROM inv_items WHERE code=? AND id<>?",(code,item["id"] if item else 0)).fetchone():
             raise ValueError("Ya existe un insumo con ese código.")
     if item:
+        if fields[3]!=item["unit"] and quantity_measure(item)[1]:
+            raise ValueError("Cambia la presentación desde Cambiar unidad.")
         if (fields[3] != item["unit"] or fields[6] != item["perishable"]) and db.execute(
             "SELECT 1 FROM inv_lots WHERE item_id=? UNION SELECT 1 FROM inv_recipes WHERE item_id=? UNION SELECT 1 FROM inv_rules WHERE source_id=? OR target_id=?",
             (item["id"],)*4).fetchone():
@@ -360,6 +391,21 @@ def _item_category(db,user,p):
         db.execute("UPDATE inv_items SET category=? WHERE id=?",(category,item["id"]))
     _set_item_area(db, item, area)
     return {"id":item["id"],"category":category,"area":area}
+
+
+def _configure_item_unit(db,user,p):
+    _role(user,"admin")
+    item=_item(db,p.get("id"))
+    unit=_text(p.get("display_unit"),"unidad de medida",20)
+    size=_scaled(p.get("base_per_unit"),1000,"Equivalencia",high=1_000_000_000)
+    if p.get("expected_unit_milli",quantity_measure(item)[1])!=quantity_measure(item)[1]:
+        raise ValueError("La unidad del insumo cambió. Actualiza antes de continuar.")
+    if unit.casefold()==item["unit"].casefold() and size!=1000:
+        raise ValueError("Usa un nombre diferente si la nueva unidad tiene otra equivalencia.")
+    canonical_potato=potato_quantity_step(item["name"],item["unit"]) and unit.casefold()==item["unit"].casefold()
+    measure=(None,None) if canonical_potato else (unit,size)
+    db.execute("UPDATE inv_items SET display_unit=?,display_unit_milli=? WHERE id=?",(*measure,item["id"]))
+    return {"id":item["id"],"unit":unit}
 
 
 def _menu_category(db,user,p):
@@ -411,10 +457,10 @@ def _save_product(db, user, p, *, demo=False):
         ingredient = _item(db,row.get("item_id"))
         quantity=row.get("qty")
         measured=isinstance(quantity,dict)
-        requested=item_quantity(ingredient["name"],quantity,unit=ingredient["unit"]) if measured else qty(quantity)
+        requested=item_quantity(ingredient["name"],quantity,unit=ingredient["unit"],item=ingredient) if measured else qty(quantity)
         item,amount=porciones.resolve(db,ingredient["id"],requested)
         if not measured and not demo and previous.get(item)!=amount:
-            check_item_quantity(ingredient["name"],requested)
+            check_item_quantity(ingredient["name"],requested,unit=ingredient["unit"],item=ingredient)
         if item in added:
             raise ValueError("Agrupa las cantidades del mismo insumo en una línea de receta.")
         added.add(item)
@@ -430,9 +476,9 @@ def _rule(db,user,p):
         raise ValueError("Selecciona un insumo transformable y un producto de destino diferente.")
     existing=db.execute("SELECT source_qty,target_qty FROM inv_rules WHERE source_id=? AND target_id=?",
                         (source["id"],target["id"])).fetchone()
-    source_qty=item_quantity(source["name"],p.get("source_qty"),"Cantidad consumida",unit=source["unit"],
+    source_qty=item_quantity(source["name"],p.get("source_qty"),"Cantidad consumida",unit=source["unit"],item=source,
                              previous=existing[0] if existing else None)
-    target_qty=item_quantity(target["name"],p.get("target_qty"),"Cantidad producida",unit=target["unit"],
+    target_qty=item_quantity(target["name"],p.get("target_qty"),"Cantidad producida",unit=target["unit"],item=target,
                              previous=existing[1] if existing else None)
     values=(source_qty,target_qty,source["id"],target["id"])
     if not db.execute("UPDATE inv_rules SET source_qty=?,target_qty=? WHERE source_id=? AND target_id=?",values).rowcount:
@@ -1021,7 +1067,7 @@ def _history(db,user,p,recent=False):
         conditions.append("i.id=?")
         args.append(item["id"])
     query="""SELECT m.id,m.at,m.lot_id,m.delta AS qty,m.reason,m.ref,m.operator,
-             c.item_name AS item,i.id AS item_id,c.area,i.unit FROM inv_moves m JOIN inv_lots l ON l.id=m.lot_id
+             c.item_name AS item,i.id AS item_id,c.area,i.unit,i.display_unit,i.display_unit_milli FROM inv_moves m JOIN inv_lots l ON l.id=m.lot_id
              JOIN inv_items i ON i.id=l.item_id JOIN inv_move_context c ON c.move_id=m.id"""
     if conditions:
         query+=" WHERE "+" AND ".join(conditions)
@@ -1053,6 +1099,7 @@ def _products(db,balances,all_items):
         prod["recipe"]=[{
             "item_id":i, "qty":num(n), "available":items[i]["available"],
             "name":items[i]["name"], "unit":items[i]["unit"], "shared_stock":i in shared_items,
+            "display_unit":items[i].get("display_unit"), "display_unit_milli":items[i].get("display_unit_milli"),
         } for i,n in raw]
         prod["price"]/=100
         products.append(prod)
@@ -1333,7 +1380,8 @@ def act(db,user,action,payload):
     if not isinstance(payload,dict):
         raise ValueError("Los datos de la operación son inválidos.")
     routes={"inv.portions":porciones.setup,"pedidos.void_sale":_void_sale,"pedidos.undo_request":_undo_request,"inv.menu_category":_menu_category,"pedidos.request_refund":_request_refund,"pedidos.resolve_refund":_resolve_refund,
-            "inv.item":_save_item,"inv.item_category":_item_category,"inv.product":_save_product,"inv.rule":_rule,"inv.transform":_transform,
+            "inv.item":_save_item,"inv.item_category":_item_category,"inv.item_unit":_configure_item_unit,
+            "inv.product":_save_product,"inv.rule":_rule,"inv.transform":_transform,
             "pedidos.save":_save_order,"pedidos.cancel":_cancel,"pedidos.pay":_pay,"pedidos.refund":_refund,
             "pedidos.exchange":_exchange,
             "pedidos.send":_send_to_areas,"pedidos.prep":_advance_preparation,
@@ -1345,7 +1393,7 @@ def act(db,user,action,payload):
         item=_item(db,payload.get("item_id"))
         _in_area(user,item["area"])
         detail=_text(payload.get("reason"),"motivo",300)
-        amount=item_quantity(item["name"],payload.get("qty"),unit=item["unit"])
+        amount=item_quantity(item["name"],payload.get("qty"),unit=item["unit"],item=item)
         withdraw(db,user,item["id"],amount,"Consumo · "+detail,item["area"])
         return {}
     if action not in routes:
@@ -1389,11 +1437,13 @@ def init(db,demo=True):
         ids[code]=item
         expiry=(first_day+timedelta(days=life)).isoformat() if life is not None else None
         receive(db,SYSTEM,item,qty(opening),expiry,"Apertura de demostración","Inventario inicial")
+    _configure_item_unit(db,SYSTEM,{"id":ids["RES-01"],"display_unit":"filetes","base_per_unit":"0.28"})
+    _configure_item_unit(db,SYSTEM,{"id":ids["ARR-01"],"display_unit":"porciones","base_per_unit":"0.5"})
     dishes=[
         ("Cuarto de pollo a la brasa","Brasas",22,[("POL-02",1),("PAP-01",0.5),("ENS-01",1)]),
         ("Medio pollo a la brasa","Brasas",41,[("POL-02",2),("PAP-01",1.5),("ENS-01",2)]),
-        ("Parrilla personal","Parrillas",34,[("RES-01",0.28),("PAP-01",0.2),("ENS-01",1)]),
-        ("Chaufa de pollo","Orientales",19,[("ARR-01",0.25),("POL-03",0.12)]),
+        ("Parrilla personal","Parrillas",34,[("RES-01",0.28),("PAP-01",0.5),("ENS-01",1)]),
+        ("Chaufa de pollo","Orientales",19,[("ARR-01",0.5),("POL-03",0.12)]),
         ("Chicha morada","Barra",7,[("BEB-01",0.4)]),
         ("Gaseosa personal","Barra",5,[("BEB-02",1)]),
         ("Pollo entero a la brasa","Brasas",68,[("POL-02",4),("PAP-01",3),("ENS-01",4)]),

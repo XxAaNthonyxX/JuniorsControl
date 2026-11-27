@@ -48,33 +48,65 @@ function allowsDecimalQuantity(name){
  const words=String(name||"").toLowerCase().split(/[^\p{L}\p{N}_]+/u);
  return words.some(word=>["papa","papas","arroz"].includes(word));
 }
-function itemQuantityStep(name,previous=null,value=previous){
- if(allowsDecimalQuantity(name))return 0.001;
- return previous!=null&&Number(previous)%1!==0&&Number(value)===Number(previous)?0.001:1;
+function potatoStep(name,unit){
+ if(!/\bpapas?\b/i.test(name||""))return 0;
+ const key=String(unit||"").trim().toLowerCase();
+ if(["kg","kgs","kilo","kilos","kilogramo","kilogramos"].includes(key))return 500;
+ return ["g","gramo","gramos"].includes(key)?500000:0;
 }
-function setItemQuantityStep(field,name,allowZero=false,previous=null){
- const step=itemQuantityStep(name,previous,field.value);
+function itemQuantityStep(name,item=null){
+ const potato=potatoStep(name,item?.unit);
+ const size=item?.display_unit_milli;
+ if(potato&&size){
+   let a=potato,b=size;
+   while(b)[a,b]=[b,a%b];
+   return potato/a;
+ }
+ if(size)return 1;
+ if(potato)return potato/1000;
+ return allowsDecimalQuantity(name)?0.001:1;
+}
+function quantityInputStep(name,item,previous,value=previous){
+ const step=itemQuantityStep(name,item);
+ const ticks=Number(previous)/step;
+ return previous!=null&&Number(value)===Number(previous)&&Math.abs(ticks-Math.round(ticks))>1e-8?"any":step;
+}
+function setItemQuantityStep(field,name,allowZero=false,previous=null,item=null){
+ const step=quantityInputStep(name,item,previous,field.value);
  field.step=step;
- field.min=allowZero?0:step;
+ field.min=allowZero||step==="any"?0:step;
 }
-function stockMeasure(name,unit){
+function stockMeasure(name,unit,item=null){
+ if(item?.display_unit_milli)return {unit:item.display_unit,factor:1000/item.display_unit_milli,size:item.display_unit_milli};
  if(allowsDecimalQuantity(name))return {unit,factor:1};
  const key=String(unit||"").trim().toLowerCase();
  if(["kg","kgs","kilo","kilos","kilogramo","kilogramos"].includes(key))return {unit:"g",factor:1000};
  if(["l","lt","lts","litro","litros"].includes(key))return {unit:"mL",factor:1000};
  return {unit,factor:1};
 }
-function stockInputValue(name,unit,quantity){
+function stockInputValue(name,unit,quantity,item=null){
  if(quantity==null||quantity==="")return "";
- return stockMeasure(name,unit).factor===1000?Math.round(Number(quantity)*1000):quantity;
+ const measure=stockMeasure(name,unit,item);
+ if(measure.size)return Math.round(Number(quantity)*1000)/measure.size;
+ return measure.factor===1000?Math.round(Number(quantity)*1000):quantity;
 }
-function stockQuantityPayload(name,unit,value){
- const measure=stockMeasure(name,unit);
+function stockUsableValue(name,unit,quantity,item=null){
+ const value=Number(stockInputValue(name,unit,quantity,item));
+ const step=itemQuantityStep(name,item);
+ return Math.trunc(Math.round(value/step*1e8)/1e8)*step;
+}
+function stockQuantityPayload(name,unit,value,item=null,previous=null){
+ const measure=stockMeasure(name,unit,item);
+ const saved=stockInputValue(name,unit,previous,item);
+ if(saved!==""&&value!==""&&quantityInputStep(name,item,saved,value)==="any")return previous;
+ if(measure.size)return {unit:measure.unit,value,unit_milli:measure.size};
  return measure.factor===1000?{unit:measure.unit,value}:value;
 }
-function formatStockQuantity(name,unit,quantity){
- const measure=stockMeasure(name,unit);
- const value=Number(stockInputValue(name,unit,quantity));
+function formatStockQuantity(name,unit,quantity,item=null){
+ const measure=stockMeasure(name,unit,item);
+ const value=measure.size||potatoStep(name,unit)?stockUsableValue(name,unit,quantity,item):
+   Number(stockInputValue(name,unit,quantity,item));
+ if(measure.size)return `${fmt(value)} ${measure.unit}`;
  if(Number.isInteger(value))return `${value} ${measure.unit}`;
  if(allowsDecimalQuantity(name))return `${fmt(value)} ${measure.unit}`;
  const thousandths=Math.round(Math.abs(value)*1000);

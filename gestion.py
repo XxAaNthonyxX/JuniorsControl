@@ -5,6 +5,7 @@ Las cantidades se almacenan en milésimas y los importes en céntimos de sol.
 """
 
 from datetime import date, datetime, timedelta, timezone
+from math import lcm
 import re
 
 import inventario as inv
@@ -105,7 +106,7 @@ def _receipt(db, user, p):
     _require(user, "admin", "recepcion")
     item = _item(db, p.get("item_id"))
     supplier = _text(p.get("supplier"), "proveedor", 100)
-    quantity = inv.item_quantity(item["name"],p.get("qty"),unit=item["unit"])
+    quantity = inv.item_quantity(item["name"],p.get("qty"),unit=item["unit"],item=item)
     cost = _int(p.get("unit_cents", 0), "precio unitario")
     _cap_line(quantity, cost)
     cur = db.execute("""INSERT INTO g_receipts(item_id,supplier,qty_m,unit_cents,created,actor) OUTPUT INSERTED.id
@@ -119,10 +120,10 @@ def _receive(db, user, p):
     if r["approved_m"] is not None:
         raise ValueError("Esta recepción ya fue revisada.")
     item = _item(db,r["item_id"])
-    approved = inv.item_quantity(item["name"],p.get("approved"),"Cantidad aprobada",unit=item["unit"],
+    approved = inv.item_quantity(item["name"],p.get("approved"),"Cantidad aprobada",unit=item["unit"],item=item,
                                  minimum=0,previous=r["qty_m"])
     # En la interfaz anterior se conocía el total de la diferencia, sin su desglose.
-    received = inv.item_quantity(item["name"],p["received"],"Cantidad entregada",unit=item["unit"],
+    received = inv.item_quantity(item["name"],p["received"],"Cantidad entregada",unit=item["unit"],item=item,
                                  minimum=0,previous=r["qty_m"]) if "received" in p else None
     if received is not None and approved > received:
         raise ValueError("La cantidad aprobada supera la entregada por el proveedor.")
@@ -177,7 +178,7 @@ def _waste(db, user, p):
     item = _item(db, p.get("item_id"))
     if not _waste_accessible(user, item["area"]):
         raise PermissionError("El insumo pertenece a otra área.")
-    amount=inv.item_quantity(item["name"],p.get("qty"),unit=item["unit"])
+    amount=inv.item_quantity(item["name"],p.get("qty"),unit=item["unit"],item=item)
     source_id,quantity=inv.porciones.resolve(db,item["id"],amount)
     lot_id = _int(p["lot_id"], "lote", 1) if p.get("lot_id") not in (None,"") else None
     reason = _text(p.get("reason"), "motivo de la merma", 500)
@@ -232,7 +233,7 @@ def _lines(db, rows, previous=None):
         if item_id in seen:
             raise ValueError("Agrupa la cantidad del mismo insumo en una sola línea.")
         seen.add(item_id)
-        quantity = inv.item_quantity(item["name"],r.get("qty"),unit=item["unit"],previous=previous.get(item_id))
+        quantity = inv.item_quantity(item["name"],r.get("qty"),unit=item["unit"],item=item,previous=previous.get(item_id))
         cost = _int(r.get("unit_cents"), "precio unitario")
         _cap_line(quantity, cost)
         checked.append((item_id, quantity, cost))
@@ -380,8 +381,14 @@ def _report(db, actor, scheduled, stocks=None, at=None):
             continue
         # Restablecer un objetivo de dos mínimos; en un mínimo cero proponemos una unidad.
         suggested = max(1000 if minimum == 0 else 1, minimum*2-available)
-        if not inv.allows_decimal(item["name"]) and item["unit"].strip().casefold() not in inv.SMALL_STOCK_UNITS:
-            suggested = ((suggested+999)//1000)*1000
+        _, size = inv.quantity_measure(item)
+        potato_step = inv.potato_quantity_step(item["name"],item["unit"])
+        if potato_step:
+            size = lcm(size or 1,potato_step)
+        if not size and not inv.allows_decimal(item["name"]) and item["unit"].strip().casefold() not in inv.SMALL_STOCK_UNITS:
+            size = 1000
+        if size:
+            suggested = ((suggested+size-1)//size)*size
         shortages.append((item["id"],available,minimum,suggested))
         lines.append((item["id"],suggested,_price(db,item["id"])))
     purchase_id = None
@@ -398,7 +405,7 @@ def _report(db, actor, scheduled, stocks=None, at=None):
 def _configure_alerts(db, user, payload):
     _require(user, "admin")
     item = inv._item(db, payload.get("item_id"))
-    minimum = inv.item_quantity(item["name"],payload.get("min_qty"),"Cantidad mínima crítica",unit=item["unit"],
+    minimum = inv.item_quantity(item["name"],payload.get("min_qty"),"Cantidad mínima crítica",unit=item["unit"],item=item,
                                 minimum=0,previous=item["min_qty"])
 
     if "warn_days" in payload:
@@ -421,8 +428,11 @@ def _alerts(db, stocks):
     active = {}
     for i in stocks:
         if i["available"] <= i["min_qty"]:
-            unit=inv.SMALL_STOCK_UNITS.get(i["unit"].strip().casefold()) if not inv.allows_decimal(i["name"]) else None
-            available=str(round(i["available"]*1000)) if unit else f"{i['available']:g}"
+            unit,size=inv.quantity_measure(i)
+            if not unit and not inv.allows_decimal(i["name"]):
+                unit=inv.SMALL_STOCK_UNITS.get(i["unit"].strip().casefold())
+                size=1
+            available=str(round(i["available"]*1000)//size) if unit else f"{i['available']:g}"
             active[f"min.{i['id']}"] = ("Stock mínimo",i["id"],
                 f"{i['name']} alcanzó el mínimo. Disponible al activar la alerta: {available} {unit or i['unit']}.")
     for lot in inv.batches(db):
@@ -528,7 +538,7 @@ def state(db, user):
             WHERE days.day IS NOT NULL ORDER BY days.day DESC""",(inv.business_day(db),))]
         result["cash_expenses"]=[dict(r) for r in db.execute("SELECT * FROM cash_expenses ORDER BY day DESC,id DESC")]
     if receiving:
-        for r in db.execute("""SELECT r.id,r.item_id,i.code item_code,i.name item_name,i.unit,i.area,i.perishable,r.supplier,r.qty_m,
+        for r in db.execute("""SELECT r.id,r.item_id,i.code item_code,i.name item_name,i.unit,i.display_unit,i.display_unit_milli,i.area,i.perishable,r.supplier,r.qty_m,
                 r.approved_m,r.received_m,r.reason,r.created,r.actor,r.reviewed_at,r.reviewer,r.unit_cents,
                 r.lot_id,l.expiry,k.purchase_id,COALESCE(p.purchase_day,LEFT(p.created,10)) purchase_day
                 FROM g_receipts r JOIN inv_items i ON i.id=r.item_id
@@ -546,7 +556,7 @@ def state(db, user):
             if not admin:
                 receipt.pop("unit_cents")
             result["receipts"].append(receipt)
-        for r in db.execute("""SELECT p.id,p.receipt_id,r.item_id,k.purchase_id,i.name item_name,i.unit,r.supplier,
+        for r in db.execute("""SELECT p.id,p.receipt_id,r.item_id,k.purchase_id,i.name item_name,i.unit,i.display_unit,i.display_unit_milli,r.supplier,
                 r.qty_m,r.received_m,r.approved_m,r.reason,p.created,r.reviewer AS actor,
                 p.resolution,p.closed,p.closer FROM g_incidents p JOIN g_receipts r ON r.id=p.receipt_id
                 JOIN inv_items i ON i.id=r.item_id LEFT JOIN g_lines k ON k.id=r.line_id
@@ -560,7 +570,7 @@ def state(db, user):
             issue["status"] = "Resuelta" if issue["closed"] else "Abierta"
             result["incidents"].append(issue)
     if user["role"] in {"admin","recepcion","area"}:
-        for r in db.execute("""SELECT w.*,i.name item_name,i.unit,i.area FROM g_wastes w
+        for r in db.execute("""SELECT w.*,i.name item_name,i.unit,i.display_unit,i.display_unit_milli,i.area FROM g_wastes w
                   JOIN inv_items i ON i.id=w.item_id ORDER BY CASE WHEN w.status='Pendiente' THEN 0 ELSE 1 END,w.id DESC"""):
             if _waste_accessible(user,r["area"]):
                 waste = _with_code(r,"ME")
@@ -582,7 +592,7 @@ def state(db, user):
         purchase.update(lines=[], total_cents=0)
         purchases[r["id"]] = purchase
     if purchases:
-        line_query = """SELECT l.purchase_id,l.item_id,i.name item_name,i.unit,l.qty_m,l.unit_cents
+        line_query = """SELECT l.purchase_id,l.item_id,i.name item_name,i.unit,i.display_unit,i.display_unit_milli,l.qty_m,l.unit_cents
                         FROM g_lines l JOIN inv_items i ON i.id=l.item_id"""
         if not admin:
             line_query += " JOIN g_purchases p ON p.id=l.purchase_id WHERE p.assignee_id=?"
@@ -599,10 +609,11 @@ def state(db, user):
         result["schedule"] = _one(db,"SELECT run_time FROM g_settings WHERE id=1")[0]
         reports = {r["id"]:dict(_with_code(r,"INF"),count=0,lines=[]) for r in db.execute(
             "SELECT id,day,created,scheduled,purchase_id FROM g_reports ORDER BY id DESC")}
-        for r in db.execute("""SELECT s.*,i.name item_name,i.unit FROM g_shortage s
+        for r in db.execute("""SELECT s.*,i.name item_name,i.unit,i.display_unit,i.display_unit_milli FROM g_shortage s
                                JOIN inv_items i ON i.id=s.item_id ORDER BY i.name"""):
             report = reports[r["report_id"]]
             report["lines"].append({"item_id":r["item_id"],"item_name":r["item_name"],"unit":r["unit"],
+                                    "display_unit":r["display_unit"], "display_unit_milli":r["display_unit_milli"],
                                     "available":inv.num(r["available_m"]),"minimum":inv.num(r["minimum_m"]),
                                     "suggested":inv.num(r["suggested_m"])})
             report["count"] += 1

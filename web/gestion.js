@@ -15,8 +15,8 @@
   const numberAttrs = 'min="0" step="0.01"';
   const stack = (...parts) => '<div class="stack">'+parts.filter(Boolean).join("")+'</div>';
   const item = id => rows("items").find(x=>x.id === id);
-  const qtyText = (record,value) => formatStockQuantity(record.item_name||record.name,record.unit,value);
-  const itemOptions = () => rows("items").map(x=>[x.id,`${x.code} · ${x.name} (${stockMeasure(x.name,x.unit).unit})`]);
+  const qtyText = (record,value) => formatStockQuantity(record.item_name||record.name,record.unit,value,record);
+  const itemOptions = () => rows("items").map(x=>[x.id,`${x.code} · ${x.name} (${stockMeasure(x.name,x.unit,x).unit})`]);
   const note = value => '<p class="muted">'+e(value)+'</p>';
   const metric = (name,value) => '<div class="metric"><span class="muted">'+e(name)+'</span><div class="value">'+e(value)+'</div></div>';
   const group = (...metrics) => '<div class="metrics">'+metrics.join("")+'</div>';
@@ -35,7 +35,7 @@
       v=>{
         const selected=item(Number(v.item_id));
         return run("gestion.receipt",{item_id:v.item_id,supplier:v.supplier,
-          qty:stockQuantityPayload(selected?.name,selected?.unit,v.qty),unit_cents:cents(v.cost)},"Entrega registrada");
+          qty:stockQuantityPayload(selected?.name,selected?.unit,v.qty,selected),unit_cents:cents(v.cost)},"Entrega registrada");
       },
       "Registrar entrega");
     const form=dialog.querySelector("form");
@@ -43,11 +43,11 @@
     const update=()=>{
       const selected=item(Number(itemField.value));
       const field=form.elements.namedItem("qty");
-      const displayUnit=stockMeasure(selected?.name,selected?.unit).unit;
+      const displayUnit=stockMeasure(selected?.name,selected?.unit,selected).unit;
       field.closest("label").querySelector("span").textContent=displayUnit?`Cantidad prevista (${displayUnit})`:"Cantidad prevista";
       form.elements.namedItem("cost").closest("label").querySelector("span").textContent=
         selected?`Costo por ${selected.unit} (S/)`:"Costo unitario (S/)";
-      setItemQuantityStep(field,selected?.name);
+      setItemQuantityStep(field,selected?.name,false,null,selected);
     };
     itemField.addEventListener("change",update);
     update();
@@ -58,25 +58,25 @@
     const summary=[r.purchase_id?label("OC",r.purchase_id):r.code,r.supplier,
       r.item_code,r.item_name,`${qtyText(r,r.qty)} previstos`].filter(Boolean).join(" · ");
     const cost=r.unit_cents!=null?note(`Costo por ${r.unit} ${money(r.unit_cents)}`):"";
-    const unit=stockMeasure(r.item_name,r.unit).unit;
-    const value=stockInputValue(r.item_name,r.unit,r.qty);
-    const step=itemQuantityStep(r.item_name,value);
+    const unit=stockMeasure(r.item_name,r.unit,r).unit;
+    const value=stockInputValue(r.item_name,r.unit,r.qty,r);
+    const step=quantityInputStep(r.item_name,r,value);
     const received=input("received",`Cantidad entregada (${unit})`,"number",value,`required min="0" step="${step}"`);
     const approval=approve?input("approved",`Cantidad en buen estado (${unit})`,"number",value,
-      `required min="${step}" max="${e(value)}" step="${step}"`)+
+      `required min="${step==="any"?0:step}" max="${e(value)}" step="${step}"`)+
       input("expiry",r.perishable?"Vencimiento del lote aprobado":"Vencimiento, si corresponde","date","",r.perishable?"required":""):"";
     const dialog=modal(`${verb} · ${r.item_name}`,note(summary)+cost+received+approval+
       input("reason",approve?"Motivo si hay faltantes o unidades rechazadas":"Motivo del rechazo","text","",
         approve?"maxlength=500":"required maxlength=500")+
       note(approve?"Solo la cantidad aprobada ingresará al stock. Las diferencias quedarán como solicitudes pendientes.":
         "La solicitud quedará pendiente para que Administración gestione el rechazo con el proveedor."),
-      v=>run("gestion.receive",{id:r.id,received:stockQuantityPayload(r.item_name,r.unit,v.received),
-        approved:stockQuantityPayload(r.item_name,r.unit,approve?v.approved:"0"),expiry:v.expiry,reason:v.reason},
+      v=>run("gestion.receive",{id:r.id,received:stockQuantityPayload(r.item_name,r.unit,v.received,r,r.qty),
+        approved:stockQuantityPayload(r.item_name,r.unit,approve?v.approved:"0",r,r.qty),expiry:v.expiry,reason:v.reason},
         approve?"Recepción aprobada · stock actualizado":"Solicitud de rechazo registrada"),verb);
     dialog.querySelector("form").addEventListener("input",event=>{
       const field=event.target;
       if(["received","approved"].includes(field.name)){
-        setItemQuantityStep(field,r.item_name,field.name==="received",value);
+        setItemQuantityStep(field,r.item_name,field.name==="received",value,r);
       }
     });
   }
@@ -143,7 +143,7 @@
     const assigned=S.inventory_access_areas;
     const lots=rows("lots").filter(x=>{
       const i=item(x.item_id);
-      return i && stockInputValue(i.name,i.unit,x.available)>=itemQuantityStep(i.name) && (admin() || assigned.includes(i.area));
+      return i && stockInputValue(i.name,i.unit,x.available,i)>=itemQuantityStep(i.name,i) && (admin() || assigned.includes(i.area));
     });
     if(!lots.length){
       toast("No hay lotes con existencias disponibles para reportar una merma.",true);
@@ -166,7 +166,7 @@
         const lot=lots.find(x=>x.id===Number(v.lot));
         if (!lot) throw Error("Selecciona un lote con existencias.");
         const selected=item(lot.item_id);
-        const qty=stockQuantityPayload(selected.name,selected.unit,v.qty);
+        const qty=stockQuantityPayload(selected.name,selected.unit,v.qty,selected);
         return run("gestion.waste",{item_id:lot.item_id,lot_id:lot.id,qty,occurred_on:v.occurred_on,reason:v.reason},"Merma reportada");
       },"Enviar a revisión");
     const form=dialog.querySelector("form");
@@ -180,10 +180,10 @@
     const updateLimit=()=>{
       const lot=lots.find(x=>x.id===Number(lotField.value));
       const selected=item(lot.item_id);
-      quantityField.max=stockInputValue(selected.name,selected.unit,lot.available);
+      quantityField.max=stockUsableValue(selected.name,selected.unit,lot.available,selected);
       quantityField.closest("label").querySelector("span").textContent=
-        `Cantidad afectada (${stockMeasure(selected.name,selected.unit).unit})`;
-      setItemQuantityStep(quantityField,selected.name);
+        `Cantidad afectada (${stockMeasure(selected.name,selected.unit,selected).unit})`;
+      setItemQuantityStep(quantityField,selected.name,false,null,selected);
     };
     lotField.addEventListener("change",updateLimit);
     updateLimit();
@@ -212,19 +212,19 @@
   function purchaseForm(p, {day=S.calendar_today||S.today, source=null}={}) {
     const current=new Map((p?.lines||[]).map(x=>[x.item_id,x]));
     const options=admin()?rows("items").map(x=>({
-      item_id:x.id,name:x.name,unit:x.unit,available:x.available,minimum:x.min_qty,
+      ...x,item_id:x.id,minimum:x.min_qty,
       critical:x.available<=x.min_qty,
     })).sort((a,b)=>Number(b.critical)-Number(a.critical)||a.name.localeCompare(b.name,"es")):
-      p.lines.map(x=>({item_id:x.item_id,name:x.item_name,unit:x.unit}));
+      p.lines.map(x=>({...x,name:x.item_name}));
     const delegables=[["","Sin asignar"],...rows("users").filter(x=>x.active).map(x=>[x.id,x.name])];
     const assigned=admin()?select("assignee_id","Responsable delegado",delegables,p?.assignee_id||source?.assignee_id||""):"";
     const headers=admin()?["Insumo","Existencias","Cantidad","S/ por unidad"]:["Insumo","Cantidad","S/ por unidad"];
     const lines = table(headers,options.map(x=>{
       const line=current.get(x.item_id);
       const n=x.item_id;
-      const unit=stockMeasure(x.name,x.unit).unit;
-      const value=stockInputValue(x.name,x.unit,line?.qty);
-      const step=itemQuantityStep(x.name,value||null);
+      const unit=stockMeasure(x.name,x.unit,x).unit;
+      const value=stockInputValue(x.name,x.unit,line?.qty,x);
+      const step=quantityInputStep(x.name,x,value||null);
       return [e(x.name)+sub(unit),
         ...(admin()?[badge(x.critical?"Crítico":"Normal")+sub(`${qtyText(x,x.available)} disponibles · mínimo ${qtyText(x,x.minimum)}`)]:[]),
         `<label><input aria-label="Cantidad de ${e(x.name)} (${e(unit)})" name="q${n}" data-purchase-qty="${n}" type="number" min="0" step="${step}" value="${e(value)}" style="width:7em"> ${e(unit)}</label>`,
@@ -237,7 +237,7 @@
       '<div class="full">'+note("Completa la cantidad y el costo unitario de los insumos que deseas comprar.")+lines+'</div>',
       v=>{
         const details=options.filter(x=>Number(v["q"+x.item_id])>0).map(x=>({
-          item_id:x.item_id,qty:stockQuantityPayload(x.name,x.unit,v["q"+x.item_id]),unit_cents:cents(v["c"+x.item_id]||0)
+          item_id:x.item_id,qty:stockQuantityPayload(x.name,x.unit,v["q"+x.item_id],x,current.get(x.item_id)?.qty),unit_cents:cents(v["c"+x.item_id]||0)
         }));
         const payload={supplier:v.supplier,lines:details};
         if (admin()) payload.assignee_id=v.assignee_id;
@@ -252,8 +252,8 @@
       if(!field.dataset.purchaseQty)return;
       const id=Number(field.dataset.purchaseQty);
       const selected=byId.get(id);
-      const previous=stockInputValue(selected.name,selected.unit,current.get(id)?.qty);
-      setItemQuantityStep(field,selected.name,true,previous||null);
+      const previous=stockInputValue(selected.name,selected.unit,current.get(id)?.qty,selected);
+      setItemQuantityStep(field,selected.name,true,previous||null,selected);
     });
   }
 
@@ -270,7 +270,7 @@
     const sheet = [
       ["Orden","Fecha","Proveedor","Estado"],[p.code,when(p.created),p.supplier,p.status],[],
       ["Insumo","Unidad","Cantidad","Unidad de cotización","Precio unitario (S/)","Importe (S/)"],
-      ...p.lines.map(l=>[l.item_name,stockMeasure(l.item_name,l.unit).unit,stockInputValue(l.item_name,l.unit,l.qty),
+      ...p.lines.map(l=>[l.item_name,stockMeasure(l.item_name,l.unit,l).unit,stockInputValue(l.item_name,l.unit,l.qty,l),
         l.unit,(l.unit_cents/100).toFixed(2),(l.total_cents/100).toFixed(2)]),
       ["Total (S/)","","","","",(p.total_cents/100).toFixed(2)]
     ];
@@ -399,7 +399,7 @@
       '</div><p id="alert-expiry-preview" class="muted" aria-live="polite"></p>';
     const dialog=modal("Configurar alertas",fields,values=>{
       const selected=item(Number(values.item_id));
-      values.min_qty=stockQuantityPayload(selected.name,selected.unit,values.min_qty);
+      values.min_qty=stockQuantityPayload(selected.name,selected.unit,values.min_qty,selected,selected.min_qty);
       return run("gestion.configure_alerts",values,"Alertas del insumo actualizadas");
     },"Guardar alertas");
     const form=dialog.querySelector("form");
@@ -435,11 +435,11 @@
     function loadSettings() {
       const selected=item(Number(itemField.value));
       const source=item(selected.base_id)||selected;
-      minimum.value=stockInputValue(selected.name,selected.unit,selected.min_qty);
-      setItemQuantityStep(minimum,selected.name,true,minimum.value);
-      minimum.max=stockInputValue(selected.name,selected.unit,1000000);
+      minimum.value=stockInputValue(selected.name,selected.unit,selected.min_qty,selected);
+      setItemQuantityStep(minimum,selected.name,true,minimum.value,selected);
+      minimum.max=stockInputValue(selected.name,selected.unit,1000000,selected);
       minimum.closest("label").querySelector("span").textContent=
-        `Cantidad mínima crítica (${stockMeasure(selected.name,selected.unit).unit})`;
+        `Cantidad mínima crítica (${stockMeasure(selected.name,selected.unit,selected).unit})`;
       days.value=source.warn_days;
       days.disabled=!source.perishable;
       expiryFields.hidden=days.disabled;
@@ -448,7 +448,7 @@
     itemField.addEventListener("change",loadSettings);
     minimum.addEventListener("input",()=>{
       const selected=item(Number(itemField.value));
-      setItemQuantityStep(minimum,selected.name,true,stockInputValue(selected.name,selected.unit,selected.min_qty));
+      setItemQuantityStep(minimum,selected.name,true,stockInputValue(selected.name,selected.unit,selected.min_qty,selected),selected);
     });
     days.addEventListener("input",updatePreview);
     loadSettings();

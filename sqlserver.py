@@ -131,6 +131,11 @@ def _aplicar_v14(db):
     reserve_pending_wastes(db)
 
 
+def _aplicar_v17(db):
+    for batch in (ROOT/"sql/unidades_insumos_v17.sql").read_text(encoding="utf8").split("\nGO\n"):
+        db.execute(batch)
+
+
 def preparar(db):
     if db.execute("SELECT DB_ID()").fetchone()[0] <= 4:
         raise ValueError("Elige una base exclusiva de JuniorsControl.")
@@ -181,8 +186,11 @@ def preparar(db):
             version = 15
         if version == 15:
             db.execute((ROOT/"sql/lotes_compras_v16.sql").read_text(encoding="utf8"))
-            return
+            version = 16
         if version == 16:
+            _aplicar_v17(db)
+            return
+        if version == 17:
             return
         if version != 2:
             raise ValueError("Versión de esquema incompatible.")
@@ -207,3 +215,4 @@ def preparar(db):
     _aplicar_v14(db)
     db.execute((ROOT/"sql/pagos_mixtos_v15.sql").read_text(encoding="utf8"))
     db.execute((ROOT/"sql/lotes_compras_v16.sql").read_text(encoding="utf8"))
+    _aplicar_v17(db)

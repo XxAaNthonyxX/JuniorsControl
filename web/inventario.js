@@ -5,11 +5,11 @@
   const isAdmin = () => S.user.role === 'admin';
   const itemById = id => S.items.find(item => Number(item.id) === Number(id));
   const asOptions = names => names.map(value => [value, value]);
-  const itemOptions = list => list.map(i => [i.id, `${i.code} · ${i.name} (${stockMeasure(i.name,i.unit).unit})`]);
+  const itemOptions = list => list.map(i => [i.id, `${i.code} · ${i.name} (${stockMeasure(i.name,i.unit,i).unit})`]);
   const option = (value, label, selected) => `<option value="${h(String(value))}" ${String(value) === String(selected) ? 'selected' : ''}>${h(label)}</option>`;
   const metric = (value, label) => `<div class="metric"><div class="value">${h(String(value))}</div><span class="muted">${h(label)}</span></div>`;
   const yesNo = [[0,'No'],[1,'Sí']];
-  const stockQuantity=(item,value)=>formatStockQuantity(item.name,item.unit,value);
+  const stockQuantity=(item,value)=>formatStockQuantity(item.name,item.unit,value,item);
   const quantityLabel=(field,label)=>{field.closest('label').querySelector('span').textContent=label;};
 
   function resetForUser() {
@@ -42,19 +42,19 @@
     const targets=itemOptions(S.items.filter(item=>Number(item.id)!==Number(i.id)));
     const fields = `<div class="field"><span id="item-code-label">Código del insumo</span><output aria-labelledby="item-code-label" class="notice">${h(suggested)}</output></div>` +
       input('name','Nombre del insumo','text',i.name || '','required maxlength="100"') +
-      input('unit','Unidad de medida','text',i.unit || '','required maxlength="20" placeholder="kg, L, und…"') +
+      input('unit',i.id?'Unidad de referencia':'Unidad de medida','text',i.unit || '',i.id?'readonly':'required maxlength="20" placeholder="kg, L, und…"') +
       `<label class="field"><span>Área responsable</span><select name="area" required>
         ${option('','Seleccionar área',i.area||'')}${S.areas.map(name=>option(name,name,i.area)).join('')}
       </select></label>` +
       sharedAreaNotice(i) +
       input('category','Categoría','text',i.category || '','required maxlength="60" list="inv-categories"') +
-      input('min_qty','Cantidad mínima','number',stockInputValue(i.name,i.unit,i.min_qty ?? 0),'required min="0"') +
+      input('min_qty','Cantidad mínima','number',stockInputValue(i.name,i.unit,i.min_qty ?? 0,i),'required min="0"') +
       input('warn_days','Avisar días antes de vencer','number',i.warn_days ?? 3,'required min="0" max="3650" step="1"') +
       select('perishable','¿Requiere vencimiento?',yesNo,i.perishable ?? 1) +
       select('transformable','¿Se transforma en otro insumo?',yesNo,i.transformable ?? 0) +
       select('target_id','Producto resultante de la transformación',[['','Seleccionar insumo resultante'],...targets],rule?.target_id || '') +
-      input('source_qty','Cantidad de materia prima por preparación','number',stockInputValue(i.name,i.unit,rule?.source_qty ?? 1),'required') +
-      input('target_qty','Cantidad de producto resultante','number',stockInputValue(ruleTarget?.name,ruleTarget?.unit,rule?.target_qty ?? 1),'required') +
+      input('source_qty','Cantidad de materia prima por preparación','number',stockInputValue(i.name,i.unit,rule?.source_qty ?? null,i),'required') +
+      input('target_qty','Cantidad de producto resultante','number',stockInputValue(ruleTarget?.name,ruleTarget?.unit,rule?.target_qty ?? null,ruleTarget),'required') +
       '<p class="muted">Equivalencia por preparación. Para convertir 1 pollo crudo en 1 pollo cocido, indica 1 y 1.</p>' +
       select('transform_now','Acción al guardar',[[0,'Guardar equivalencia'],[1,'Guardar y transformar ahora']],0) +
       '<div id="inv-transform-now" class="stack" hidden>' +
@@ -65,12 +65,12 @@
       async values=>{
         if(i.id)values.id=i.id;
         delete values.code;
-        values.min_qty=stockQuantityPayload(values.name,values.unit,values.min_qty);
+        values.min_qty=stockQuantityPayload(values.name,values.unit,values.min_qty,{...i,unit:values.unit},i.min_qty);
         if(values.target_id){
           values.transformable=1;
           const target=itemById(values.target_id);
-          values.source_qty=stockQuantityPayload(values.name,values.unit,values.source_qty);
-          values.target_qty=stockQuantityPayload(target.name,target.unit,values.target_qty);
+          values.source_qty=stockQuantityPayload(values.name,values.unit,values.source_qty,{...i,unit:values.unit},Number(values.target_id)===rule?.target_id?rule.source_qty:null);
+          values.target_qty=stockQuantityPayload(target.name,target.unit,values.target_qty,target,Number(values.target_id)===rule?.target_id?rule.target_qty:null);
         }
         const saved=await run('inv.item',values,'');
         toast(saved.transformed?'Transformación registrada · materia prima descontada y producto resultante ingresado':'Insumo guardado · '+saved.code);
@@ -84,17 +84,19 @@
       form.querySelector('button.primary').textContent=execute?'Guardar y transformar':'Guardar';
       const target=itemById(values.target_id);
       const sameTarget=Number(values.target_id)===Number(rule?.target_id);
-      const sourceUnit=stockMeasure(values.name,values.unit).unit;
-      const targetUnit=stockMeasure(target?.name,target?.unit).unit;
-      for(const [field,label,name,unit,previous] of [
-        ['min_qty','Cantidad mínima',values.name,values.unit,i.min_qty],
-        ['source_qty','Cantidad de materia prima por preparación',values.name,values.unit,sameTarget?rule.source_qty:null],
-        ['target_qty','Cantidad de producto resultante',target?.name,target?.unit,sameTarget?rule.target_qty:null],
+      const source={...i,unit:values.unit};
+      const sourceUnit=stockMeasure(values.name,values.unit,i).unit;
+      const targetUnit=stockMeasure(target?.name,target?.unit,target).unit;
+      for(const [field,label,name,unit,previous,record] of [
+        ['min_qty','Cantidad mínima',values.name,values.unit,i.min_qty,source],
+        ['source_qty','Cantidad de materia prima por preparación',values.name,values.unit,sameTarget?rule.source_qty:null,source],
+        ['target_qty','Cantidad de producto resultante',target?.name,target?.unit,sameTarget?rule.target_qty:null,target],
       ]){
         const control=form.elements.namedItem(field);
-        const displayUnit=stockMeasure(name,unit).unit;
+        if(field!=='min_qty')control.disabled=!target;
+        const displayUnit=stockMeasure(name,unit,record).unit;
         quantityLabel(control,displayUnit?`${label} (${displayUnit})`:label);
-        setItemQuantityStep(control,name,field==='min_qty',stockInputValue(name,unit,previous)||null);
+        setItemQuantityStep(control,name,field==='min_qty',stockInputValue(name,unit,previous,record)||null,record);
       }
       const count=Number(values.transform_qty);
       dialog.querySelector('#inv-transform-summary').textContent=target?
@@ -119,14 +121,23 @@
       return run('inv.item_category',changes,'Insumo actualizado');
     });
   }
+  function formItemUnit(i) {
+    const measure=stockMeasure(i.name,i.unit,i);
+    const fields=input('display_unit','Nombre de la nueva unidad','text',measure.unit,'required maxlength="20"')+
+      input('base_per_unit',`Cantidad de ${i.unit} por cada unidad nueva`,'number',1/measure.factor,
+        'required min="0.001" step="0.001" max="1000000"')+
+      `<p class="muted">Si una porción equivale a 500 g y la unidad de referencia es kg, ingresa 0,5.</p>`;
+    modal(`Cambiar unidad · ${i.code} · ${i.name}`,fields,values=>
+      run('inv.item_unit',{...values,id:i.id,expected_unit_milli:i.display_unit_milli||0},'Unidad actualizada'));
+  }
   function formUse(i) {
-    const step=itemQuantityStep(i.name);
-    const unit=stockMeasure(i.name,i.unit).unit;
-    const available=stockInputValue(i.name,i.unit,i.available);
+    const step=itemQuantityStep(i.name,i);
+    const unit=stockMeasure(i.name,i.unit,i).unit;
+    const available=stockUsableValue(i.name,i.unit,i.available,i);
     const field = input('qty',`Cantidad a consumir (${unit})`,'number','',`required min="${step}" step="${step}" max="${available}"`) +
       input('reason','Motivo del consumo','text','','required maxlength="300" placeholder="Actividad del área"');
     modal(`Consumo de ${i.name}`,field,values => run('inv.use',{
-      ...values,item_id:i.id,qty:stockQuantityPayload(i.name,i.unit,values.qty)
+      ...values,item_id:i.id,qty:stockQuantityPayload(i.name,i.unit,values.qty,i)
     },'Consumo registrado'),'Registrar salida');
   }
   function lotsPanel(i) {
@@ -135,7 +146,7 @@
     const lotRows = lots.map(l => [h(l.code),h(l.expiry || 'Sin vencimiento'),h(stockQuantity(source,l.reserved)),h(stockQuantity(source,l.available))]);
     const canConsume = isAdmin() || (['area','atencion','recepcion'].includes(S.user.role) &&
       S.inventory_access_areas.includes(i.area));
-    const actions = (canConsume && stockInputValue(i.name,i.unit,i.available)>=itemQuantityStep(i.name) ? button('Registrar consumo',()=>formUse(i),'primary') : '') +
+    const actions = (canConsume && stockInputValue(i.name,i.unit,i.available,i)>=itemQuantityStep(i.name,i) ? button('Registrar consumo',()=>formUse(i),'primary') : '') +
       (isAdmin() ? button('Editar insumo',()=>formItem(i)) : '') + button('Cerrar',()=>{ detail=null; refreshPanel(); });
     return panel(`Lotes de ${source.name}`,
       table(['Lote','Vencimiento','Reservado','Disponible'],lotRows,'Este insumo aún no tiene lotes con existencias.'),actions);
@@ -146,8 +157,9 @@
         h(i.code),`<strong>${h(i.name)}</strong><br><small class="muted">${h(i.category)}${i.base_id?` · ${i.factor} cuartos por unidad<br>Stock compartido con ${h(i.base_code)} · ${fmt(i.available_portions)} cuartos disponibles`:""}</small>`,
         h(i.area),h(i.base_id?formatStockQuantity('Pollo cocido','cuartos',i.reserved*i.factor):stockQuantity(i,i.reserved)),
         `<strong>${h(stockQuantity(i,i.available))}</strong>`,
-        badge(i.available===0 ? 'Agotado' : i.available<=i.min_qty ? 'Stock bajo' : 'Disponible'),
-        (isAdmin()?button('Editar',()=>formItem(i),'secondary')+button('Cambiar categoría o área',()=>formItemClassification(i),'secondary'):'')+button('Ver lotes',()=>{ detail=i.id; refreshPanel(); document.getElementById('inventory-detail')?.scrollIntoView({block:'nearest'}); })
+        badge(stockUsableValue(i.name,i.unit,i.available,i)===0 ? 'Agotado' : i.available<=i.min_qty ? 'Stock bajo' : 'Disponible'),
+        (isAdmin()?button('Editar',()=>formItem(i),'secondary')+button('Cambiar categoría o área',()=>formItemClassification(i),'secondary')+
+          button('Cambiar unidad',()=>formItemUnit(i),'secondary'):'')+button('Ver lotes',()=>{ detail=i.id; refreshPanel(); document.getElementById('inventory-detail')?.scrollIntoView({block:'nearest'}); })
       ]);
     return table(['Código','Insumo','Área','Reservado','Disponible','Estado','Acciones'],rows,'No hay insumos que coincidan con los filtros.');
   }
@@ -167,12 +179,12 @@
 
   function recipeRow(line={}) {
     const ingredient=itemById(line.item_id);
-    const unit=stockMeasure(ingredient?.name,ingredient?.unit).unit;
-    const value=stockInputValue(ingredient?.name,ingredient?.unit,line.qty);
-    const step=itemQuantityStep(ingredient?.name,value);
-    return `<div class="grid2" data-recipe-line data-previous-item="${h(line.item_id)}" data-previous-qty="${h(value)}" style="align-items:end;margin:8px 0;grid-template-columns:minmax(0,2fr) minmax(82px,1fr) auto">
+    const unit=stockMeasure(ingredient?.name,ingredient?.unit,ingredient).unit;
+    const value=stockInputValue(ingredient?.name,ingredient?.unit,line.qty,ingredient);
+    const step=quantityInputStep(ingredient?.name,ingredient,value||null);
+    return `<div class="grid2" data-recipe-line data-previous-item="${h(line.item_id)}" data-previous-qty="${h(value)}" data-previous-base="${h(line.qty)}" style="align-items:end;margin:8px 0;grid-template-columns:minmax(0,2fr) minmax(82px,1fr) auto">
       <label class="field">Insumo<select data-recipe-item required>${option('','Seleccionar',line.item_id)}${itemOptions(S.items).map(([v,label])=>option(v,label,line.item_id)).join('')}</select></label>
-      <label class="field"><span>Cantidad${unit?' ('+h(unit)+')':''}</span><input data-recipe-qty type="number" required min="${step}" step="${step}" value="${h(value)}"></label>
+      <label class="field"><span>Cantidad${unit?' ('+h(unit)+')':''}</span><input data-recipe-qty type="number" required min="${step==="any"?0:step}" step="${step}" value="${h(value)}"></label>
       <button type="button" class="btn secondary" data-recipe-remove aria-label="Quitar insumo">Quitar</button></div>`;
   }
   function formProduct(prod={}) {
@@ -181,9 +193,9 @@
       const existing=Array.from(rows.querySelectorAll('[data-recipe-line]'),row=>{
         const id=Number(row.querySelector('[data-recipe-item]').value);
         const ingredient=itemById(id);
-        const factor=stockMeasure(ingredient?.name,ingredient?.unit).factor;
+        const factor=stockMeasure(ingredient?.name,ingredient?.unit,ingredient).factor;
         const value=row.querySelector('[data-recipe-qty]').value;
-        return {item_id:id,qty:value===''?'':Number(value)/factor};
+        return {item_id:id,qty:value===''?'':String(id)===row.dataset.previousItem&&value===row.dataset.previousQty?Number(row.dataset.previousBase):Number(value)/factor};
       });
       const recipe=existing.filter(r=>r.item_id&&r.item_id!==group.base_id&&r.item_id!==group.potato_id);
       recipe.push({item_id:group.base_id,qty:portions},{item_id:group.potato_id,qty:potato});
@@ -200,7 +212,8 @@
       const recipe=Array.from(document.querySelectorAll('#inv-recipe-rows [data-recipe-line]'),row=>{
         const id=row.querySelector('[data-recipe-item]').value;
         const ingredient=itemById(id);
-        return {item_id:id,qty:stockQuantityPayload(ingredient?.name,ingredient?.unit,row.querySelector('[data-recipe-qty]').value)};
+        return {item_id:id,qty:stockQuantityPayload(ingredient?.name,ingredient?.unit,row.querySelector('[data-recipe-qty]').value,ingredient,
+          id===row.dataset.previousItem?Number(row.dataset.previousBase):null)};
       });
       return run('inv.product',{...values,recipe,...(prod.id ? {id:prod.id} : {})},'Producto y receta guardados');
     });
@@ -210,10 +223,10 @@
       const selected=row.querySelector('[data-recipe-item]').value;
       const ingredient=itemById(selected);
       const field=row.querySelector('[data-recipe-qty]');
-      const unit=stockMeasure(ingredient?.name,ingredient?.unit).unit;
+      const unit=stockMeasure(ingredient?.name,ingredient?.unit,ingredient).unit;
       quantityLabel(field,unit?`Cantidad (${unit})`:'Cantidad');
       setItemQuantityStep(field,ingredient?.name,false,
-        selected===row.dataset.previousItem?row.dataset.previousQty:null);
+        selected===row.dataset.previousItem?row.dataset.previousQty:null,ingredient);
     });
   }
   function productPanel() {
@@ -257,7 +270,7 @@
     const dialog=modal('Equivalencia de preparación',fields,values=>{
       for(const side of ['source','target']){
         const selected=itemById(values[side+'_id']);
-        values[side+'_qty']=stockQuantityPayload(selected?.name,selected?.unit,values[side+'_qty']);
+        values[side+'_qty']=stockQuantityPayload(selected?.name,selected?.unit,values[side+'_qty'],selected);
       }
       return run('inv.rule',values,'Equivalencia guardada');
     });
@@ -266,9 +279,9 @@
       for(const side of ['source','target']){
         const selected=itemById(form.elements.namedItem(side+'_id').value);
         const field=form.elements.namedItem(side+'_qty');
-        const unit=stockMeasure(selected?.name,selected?.unit).unit;
+        const unit=stockMeasure(selected?.name,selected?.unit,selected).unit;
         quantityLabel(field,`Cantidad ${side==='source'?'consumida':'producida'}${unit?' ('+unit+')':''}`);
-        setItemQuantityStep(field,selected?.name);
+        setItemQuantityStep(field,selected?.name,false,null,selected);
       }
     };
     form.addEventListener('change',update);
@@ -321,7 +334,7 @@
     const rows=list.map(m=>[
       `<strong>${h(m.code)}</strong><br><small class="muted">${h(m.at)}</small>`,
       `${h(m.item)}<br><small class="muted">${h(m.lot_code)} · ${h(m.area)}</small>`,
-      badge(m.qty>0 ? 'Entrada' : 'Salida'),`<strong>${m.qty>0 ? '+' : ''}${h(formatStockQuantity(m.item,m.unit,m.qty))}</strong>`,
+      badge(m.qty>0 ? 'Entrada' : 'Salida'),`<strong>${m.qty>0 ? '+' : ''}${h(formatStockQuantity(m.item,m.unit,m.qty,m))}</strong>`,
       `${h(m.reason)}<br><small class="muted">${h(m.ref || '')}</small>`,h(m.operator)
     ]);
     const criteria=[historyFilter.start && 'Desde '+historyFilter.start,historyFilter.end && 'Hasta '+historyFilter.end,historyFilter.area,

@@ -103,18 +103,14 @@ def budget(db):
 
 def _receipt(db, user, p):
     _require(user, "admin", "recepcion")
-    item_id = _item(db, p.get("item_id"))["id"]
+    item = _item(db, p.get("item_id"))
     supplier = _text(p.get("supplier"), "proveedor", 100)
-    quantity = inv.qty(p.get("qty"))
+    quantity = inv.item_quantity(item["name"],p.get("qty"))
     cost = _int(p.get("unit_cents", 0), "precio unitario")
     _cap_line(quantity, cost)
     cur = db.execute("""INSERT INTO g_receipts(item_id,supplier,qty_m,unit_cents,created,actor) OUTPUT INSERTED.id
-                        VALUES(?,?,?,?,?,?)""", (item_id, supplier, quantity, cost, stamp(), user["name"]))
+                        VALUES(?,?,?,?,?,?)""", (item["id"], supplier, quantity, cost, stamp(), user["name"]))
     return cur.lastrowid
-
-
-def _nonnegative_qty(value):
-    return 0 if re.fullmatch(r"0+(?:[.,]0{1,3})?",str(value)) else inv.qty(value)
 
 
 def _receive(db, user, p):
@@ -122,9 +118,10 @@ def _receive(db, user, p):
     r = _one(db, "SELECT * FROM g_receipts WHERE id=?", _int(p.get("id"), "recepción", 1))
     if r["approved_m"] is not None:
         raise ValueError("Esta recepción ya fue revisada.")
-    approved = _nonnegative_qty(p.get("approved"))
+    item = _item(db,r["item_id"])
+    approved = inv.item_quantity(item["name"],p.get("approved"),"Cantidad aprobada",minimum=0,previous=r["qty_m"])
     # En la interfaz anterior se conocía el total de la diferencia, sin su desglose.
-    received = _nonnegative_qty(p["received"]) if "received" in p else None
+    received = inv.item_quantity(item["name"],p["received"],"Cantidad entregada",minimum=0,previous=r["qty_m"]) if "received" in p else None
     if received is not None and approved > received:
         raise ValueError("La cantidad aprobada supera la entregada por el proveedor.")
     if approved > r["qty_m"]:
@@ -178,7 +175,7 @@ def _waste(db, user, p):
     item = _item(db, p.get("item_id"))
     if not _waste_accessible(user, item["area"]):
         raise PermissionError("El insumo pertenece a otra área.")
-    source_id,quantity=inv.porciones.resolve(db,item["id"],inv.qty(p.get("qty")))
+    source_id,quantity=inv.porciones.resolve(db,item["id"],inv.item_quantity(item["name"],p.get("qty")))
     lot_id = _int(p["lot_id"], "lote", 1) if p.get("lot_id") not in (None,"") else None
     reason = _text(p.get("reason"), "motivo de la merma", 500)
     at = stamp()
@@ -219,18 +216,20 @@ def _review_waste(db, user, p):
     return waste["id"]
 
 
-def _lines(db, rows):
+def _lines(db, rows, previous=None):
     if not isinstance(rows, list) or not rows:
         raise ValueError("Incluye al menos un insumo en la compra.")
     checked, seen = [], set()
+    previous = previous or {}
     for r in rows:
         if not isinstance(r, dict):
             raise ValueError("Comprueba los datos de cada línea.")
-        item_id = _item(db,r.get("item_id"))["id"]
+        item = _item(db,r.get("item_id"))
+        item_id = item["id"]
         if item_id in seen:
             raise ValueError("Agrupa la cantidad del mismo insumo en una sola línea.")
         seen.add(item_id)
-        quantity = inv.qty(r.get("qty"))
+        quantity = inv.item_quantity(item["name"],r.get("qty"),previous=previous.get(item_id))
         cost = _int(r.get("unit_cents"), "precio unitario")
         _cap_line(quantity, cost)
         checked.append((item_id, quantity, cost))
@@ -290,11 +289,11 @@ def _edit_purchase(db, user, p):
     if "assignee_id" in p and user["role"] == "admin":
         delegate = _assignee(db,p["assignee_id"])
     if "lines" in p:
-        lines = _lines(db,p["lines"])
+        previous = dict(db.execute("SELECT item_id,qty_m FROM g_lines WHERE purchase_id=?",(purchase["id"],)))
+        lines = _lines(db,p["lines"],previous)
         if user["role"] != "admin":
             # La delegación permite cotizar la hoja asignada, no consultar otros insumos.
-            permitted = {r[0] for r in db.execute("SELECT item_id FROM g_lines WHERE purchase_id=?",(purchase["id"],))}
-            if any(item_id not in permitted for item_id,_,_ in lines):
+            if any(item_id not in previous for item_id,_,_ in lines):
                 raise PermissionError("La delegación solo permite editar los insumos de la hoja asignada.")
         db.execute("DELETE FROM g_lines WHERE purchase_id=?",(purchase["id"],))
         _put_lines(db,purchase["id"],lines)
@@ -378,6 +377,8 @@ def _report(db, actor, scheduled, stocks=None, at=None):
             continue
         # Restablecer un objetivo de dos mínimos; en un mínimo cero proponemos una unidad.
         suggested = max(1000 if minimum == 0 else 1, minimum*2-available)
+        if not inv.allows_decimal(item["name"]):
+            suggested = ((suggested+999)//1000)*1000
         shortages.append((item["id"],available,minimum,suggested))
         lines.append((item["id"],suggested,_price(db,item["id"])))
     purchase_id = None
@@ -394,7 +395,8 @@ def _report(db, actor, scheduled, stocks=None, at=None):
 def _configure_alerts(db, user, payload):
     _require(user, "admin")
     item = inv._item(db, payload.get("item_id"))
-    minimum = inv._scaled(payload.get("min_qty"), 1000, "Cantidad mínima crítica", 0)
+    minimum = inv.item_quantity(item["name"],payload.get("min_qty"),"Cantidad mínima crítica",
+                                minimum=0,previous=item["min_qty"])
 
     if "warn_days" in payload:
         source_id, _ = inv.porciones.resolve(db, item["id"], 0)

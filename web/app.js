@@ -44,6 +44,16 @@ function brand(){return `<div class="brand"><i>${icon("flame")}</i><div><b>Junio
 function h(value){return String(value??"").replace(/[&<>"']/g,c=>({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]))}
 function cash(n){return `S/ ${Number(n||0).toLocaleString("es-PE",{minimumFractionDigits:2,maximumFractionDigits:2})}`}
 function fmt(n){return Number(n||0).toLocaleString("es-PE",{maximumFractionDigits:3})}
+function itemQuantityStep(name,previous=null,value=previous){
+ const words=String(name||"").toLowerCase().split(/[^\p{L}\p{N}_]+/u);
+ if(words.some(word=>["papa","papas","arroz"].includes(word)))return 0.001;
+ return previous!=null&&Number(previous)%1!==0&&Number(value)===Number(previous)?0.001:1;
+}
+function setItemQuantityStep(field,name,allowZero=false,previous=null){
+ const step=itemQuantityStep(name,previous,field.value);
+ field.step=step;
+ field.min=allowZero?0:step;
+}
 function exportCsv(filename,rows){
  const encode=value=>{
    if(typeof value==="number" && Number.isFinite(value))return String(value);

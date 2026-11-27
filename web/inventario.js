@@ -74,6 +74,10 @@
       dialog.querySelector('#inv-transform-now').style.display=execute?'grid':'none';
       form.querySelector('button.primary').textContent=execute?'Guardar y transformar':'Guardar';
       const target=itemById(values.target_id);
+      const sameTarget=Number(values.target_id)===Number(rule?.target_id);
+      setItemQuantityStep(form.elements.namedItem('min_qty'),values.name,true,i.min_qty);
+      setItemQuantityStep(form.elements.namedItem('source_qty'),values.name,false,sameTarget?rule.source_qty:null);
+      setItemQuantityStep(form.elements.namedItem('target_qty'),target?.name,false,sameTarget?rule.target_qty:null);
       const count=Number(values.transform_qty);
       dialog.querySelector('#inv-transform-summary').textContent=target?
         `Se descontarán ${fmt(Number(values.source_qty)*count)} ${values.unit} de ${values.name} y se ingresarán ${fmt(Number(values.target_qty)*count)} ${target.unit} de ${target.name}.`:
@@ -98,7 +102,8 @@
     });
   }
   function formUse(i) {
-    const field = input('qty',`Cantidad a consumir (${i.unit})`,'number','','required min="0.001" step="0.001" max="'+Number(i.available)+'"') +
+    const step=itemQuantityStep(i.name);
+    const field = input('qty',`Cantidad a consumir (${i.unit})`,'number','',`required min="${step}" step="${step}" max="${i.available}"`) +
       input('reason','Motivo del consumo','text','','required maxlength="300" placeholder="Actividad del área"');
     modal(`Consumo de ${i.name}`,field,values => run('inv.use',{...values,item_id:i.id},'Consumo registrado'),'Registrar salida');
   }
@@ -108,7 +113,7 @@
     const lotRows = lots.map(l => [h(l.code),h(l.expiry || 'Sin vencimiento'),fmt(l.reserved),fmt(l.available)]);
     const canConsume = isAdmin() || (['area','atencion','recepcion'].includes(S.user.role) &&
       S.inventory_access_areas.includes(i.area));
-    const actions = (canConsume && i.available>0 ? button('Registrar consumo',()=>formUse(i),'primary') : '') +
+    const actions = (canConsume && i.available>=itemQuantityStep(i.name) ? button('Registrar consumo',()=>formUse(i),'primary') : '') +
       (isAdmin() ? button('Editar insumo',()=>formItem(i)) : '') + button('Cerrar',()=>{ detail=null; refreshPanel(); });
     return panel(`Lotes de ${source.name} (${source.unit})`,
       table(['Lote','Vencimiento','Reservado','Disponible'],lotRows,'Este insumo aún no tiene lotes con existencias.'),actions);
@@ -138,9 +143,10 @@
   }
 
   function recipeRow(line={}) {
-    return `<div class="grid2" data-recipe-line style="align-items:end;margin:8px 0;grid-template-columns:minmax(0,2fr) minmax(82px,1fr) auto">
+    const step=itemQuantityStep(itemById(line.item_id)?.name,line.qty);
+    return `<div class="grid2" data-recipe-line data-previous-item="${h(line.item_id)}" data-previous-qty="${h(line.qty)}" style="align-items:end;margin:8px 0;grid-template-columns:minmax(0,2fr) minmax(82px,1fr) auto">
       <label class="field">Insumo<select data-recipe-item required>${option('','Seleccionar',line.item_id)}${itemOptions(S.items).map(([v,label])=>option(v,label,line.item_id)).join('')}</select></label>
-      <label class="field">Cantidad<input data-recipe-qty type="number" required min="0.001" step="0.001" value="${h(String(line.qty ?? ''))}"></label>
+      <label class="field">Cantidad<input data-recipe-qty type="number" required min="${step}" step="${step}" value="${h(String(line.qty ?? ''))}"></label>
       <button type="button" class="btn secondary" data-recipe-remove aria-label="Quitar insumo">Quitar</button></div>`;
   }
   function formProduct(prod={}) {
@@ -158,11 +164,18 @@
       select('prep_area','Área responsable de preparación',[["Cocina","Cocina"],["Barra","Barra"],["Parrilla","Parrilla"]],prod.prep_area||"Cocina") +
       `<div class="full"><strong>Insumos por unidad vendida</strong><div class="actions">${presets}</div><div id="inv-recipe-rows">${(prod.recipe || [{}]).map(recipeRow).join('')}</div>
         <button type="button" class="btn secondary" data-recipe-add>Agregar insumo</button></div>`;
-    modal(prod.id ? `Editar ${prod.code}` : 'Nuevo producto de carta',fields, values=>{
+    const dialog=modal(prod.id ? `Editar ${prod.code}` : 'Nuevo producto de carta',fields, values=>{
       const recipe=Array.from(document.querySelectorAll('#inv-recipe-rows [data-recipe-line]'),row=>({
         item_id:row.querySelector('[data-recipe-item]').value,qty:row.querySelector('[data-recipe-qty]').value
       }));
       return run('inv.product',{...values,recipe,...(prod.id ? {id:prod.id} : {})},'Producto y receta guardados');
+    });
+    dialog.querySelector('form').addEventListener('input',event=>{
+      const row=event.target.closest('[data-recipe-line]');
+      if(!row)return;
+      const selected=row.querySelector('[data-recipe-item]').value;
+      setItemQuantityStep(row.querySelector('[data-recipe-qty]'),itemById(selected)?.name,false,
+        selected===row.dataset.previousItem?row.dataset.previousQty:null);
     });
   }
   function productPanel() {
@@ -203,7 +216,16 @@
       input('source_qty','Cantidad consumida','number',1,'min="0.001" step="0.001" required') +
       select('target_id','Insumo preparado',itemOptions(S.items)) +
       input('target_qty','Cantidad producida','number',1,'min="0.001" step="0.001" required');
-    modal('Equivalencia de preparación',fields,values=>run('inv.rule',values,'Equivalencia guardada'));
+    const dialog=modal('Equivalencia de preparación',fields,values=>run('inv.rule',values,'Equivalencia guardada'));
+    const form=dialog.querySelector('form');
+    const update=()=>{
+      for(const side of ['source','target']){
+        const selected=itemById(form.elements.namedItem(side+'_id').value);
+        setItemQuantityStep(form.elements.namedItem(side+'_qty'),selected?.name);
+      }
+    };
+    form.addEventListener('change',update);
+    update();
   }
   function transformPanel() {
     const rows = S.rules.map(r=>{

@@ -11,7 +11,7 @@
   const muted = value => '<span class="muted">'+e(value)+'</span>';
   const sub = value => '<div class="muted">'+e(value)+'</div>';
   const actions = (...buttons) => '<div class="actions">'+buttons.filter(Boolean).join("")+'</div>';
-  const qtyAttrs = 'required min="0.001" step="0.001"';
+  const qtyAttrs = 'required min="1" step="1"';
   const numberAttrs = 'min="0" step="0.01"';
   const stack = (...parts) => '<div class="stack">'+parts.filter(Boolean).join("")+'</div>';
   const item = id => rows("items").find(x=>x.id === id);
@@ -26,13 +26,18 @@
   }
 
   function newReceipt() {
-    modal("Registrar entrega",select("item_id","Insumo",itemOptions())+
+    const dialog=modal("Registrar entrega",select("item_id","Insumo",itemOptions())+
       input("supplier","Proveedor","text","","required maxlength=100")+
       input("qty","Cantidad prevista","number","",qtyAttrs)+
       input("cost","Costo unitario (S/)","number","",numberAttrs+" required")+
       note("La entrega quedará pendiente de revisión. El stock aumenta al aprobar las unidades recibidas."),
       v=>run("gestion.receipt",{item_id:v.item_id, supplier:v.supplier, qty:v.qty, unit_cents:cents(v.cost)},"Entrega registrada"),
       "Registrar entrega");
+    const form=dialog.querySelector("form");
+    const itemField=form.elements.namedItem("item_id");
+    const update=()=>setItemQuantityStep(form.elements.namedItem("qty"),item(Number(itemField.value))?.name);
+    itemField.addEventListener("change",update);
+    update();
   }
 
   function reviewReceipt(r, approve) {
@@ -40,17 +45,24 @@
     const summary=[r.purchase_id?label("OC",r.purchase_id):r.code,r.supplier,
       r.item_code,r.item_name,`${fmt(r.qty)} ${r.unit} previstos`].filter(Boolean).join(" · ");
     const cost=r.unit_cents!=null?note(`Costo unitario ${money(r.unit_cents)}`):"";
-    const received=input("received",`Cantidad entregada (${r.unit})`,"number",r.qty,'required min="0" step="0.001"');
+    const step=itemQuantityStep(r.item_name,r.qty);
+    const received=input("received",`Cantidad entregada (${r.unit})`,"number",r.qty,`required min="0" step="${step}"`);
     const approval=approve?input("approved",`Cantidad en buen estado (${r.unit})`,"number",r.qty,
-      `required min="0.001" max="${e(r.qty)}" step="0.001"`)+
+      `required min="${step}" max="${e(r.qty)}" step="${step}"`)+
       input("expiry",r.perishable?"Vencimiento del lote aprobado":"Vencimiento, si corresponde","date","",r.perishable?"required":""):"";
-    modal(`${verb} · ${r.item_name}`,note(summary)+cost+received+approval+
+    const dialog=modal(`${verb} · ${r.item_name}`,note(summary)+cost+received+approval+
       input("reason",approve?"Motivo si hay faltantes o unidades rechazadas":"Motivo del rechazo","text","",
         approve?"maxlength=500":"required maxlength=500")+
       note(approve?"Solo la cantidad aprobada ingresará al stock. Las diferencias quedarán como solicitudes pendientes.":
         "La solicitud quedará pendiente para que Administración gestione el rechazo con el proveedor."),
       v=>run("gestion.receive",{id:r.id,received:v.received,approved:approve?v.approved:"0",expiry:v.expiry,reason:v.reason},
         approve?"Recepción aprobada · stock actualizado":"Solicitud de rechazo registrada"),verb);
+    dialog.querySelector("form").addEventListener("input",event=>{
+      const field=event.target;
+      if(["received","approved"].includes(field.name)){
+        setItemQuantityStep(field,r.item_name,field.name==="received",r.qty);
+      }
+    });
   }
 
   function resolveIncident(x) {
@@ -115,7 +127,7 @@
     const assigned=S.inventory_access_areas;
     const lots=rows("lots").filter(x=>{
       const i=item(x.item_id);
-      return x.available>0 && i && (admin() || assigned.includes(i.area));
+      return i && x.available>=itemQuantityStep(i.name) && (admin() || assigned.includes(i.area));
     });
     if(!lots.length){
       toast("No hay lotes con existencias disponibles para reportar una merma.",true);
@@ -147,7 +159,11 @@
     });
     const lotField=form.elements.namedItem("lot");
     const quantityField=form.elements.namedItem("qty");
-    const updateLimit=()=>{quantityField.max=lots.find(x=>x.id===Number(lotField.value)).available;};
+    const updateLimit=()=>{
+      const lot=lots.find(x=>x.id===Number(lotField.value));
+      quantityField.max=lot.available;
+      setItemQuantityStep(quantityField,item(lot.item_id).name);
+    };
     lotField.addEventListener("change",updateLimit);
     updateLimit();
   }
@@ -185,13 +201,14 @@
     const lines = table(headers,options.map(x=>{
       const line=current.get(x.item_id);
       const n=x.item_id;
+      const step=itemQuantityStep(x.name,line?.qty);
       return [e(x.name)+sub(x.unit),
         ...(admin()?[badge(x.critical?"Crítico":"Normal")+sub(`${fmt(x.available)} disponibles · mínimo ${fmt(x.minimum)}`)]:[]),
-        '<input aria-label="Cantidad de '+e(x.name)+'" name="q'+n+'" type="number" min="0" step="0.001" value="'+e(line?.qty||"")+'" style="width:7em">',
+        `<input aria-label="Cantidad de ${e(x.name)}" name="q${n}" data-purchase-qty="${n}" type="number" min="0" step="${step}" value="${e(line?.qty||"")}" style="width:7em">`,
         '<input aria-label="Costo de '+e(x.name)+'" name="c'+n+'" type="number" min="0" step="0.01" value="'+e(line?line.unit_cents/100:"")+'" style="width:7em">'];
     }),"Agrega insumos al inventario para preparar la compra.");
     const lotDay=p?purchaseDayOf(p):source?purchaseDayOf(source):day;
-    modal(p?"Editar "+p.code:source?"Ampliar "+source.code:"Nueva hoja de compra",
+    const dialog=modal(p?"Editar "+p.code:source?"Ampliar "+source.code:"Nueva hoja de compra",
       note(`Lote ${purchaseLotCode(lotDay)} · ${date(lotDay)}`)+
       input("supplier","Proveedor","text",p?.supplier||source?.supplier||"","maxlength=100")+assigned+
       '<div class="full">'+note("Completa la cantidad y el costo unitario de los insumos que deseas comprar.")+lines+'</div>',
@@ -206,6 +223,13 @@
         if (source) payload.source_purchase_id=source.id;
         return run(p?"gestion.edit_purchase":"gestion.purchase",payload,"Hoja de compra guardada");
       },"Guardar hoja");
+    const byId=new Map(options.map(option=>[option.item_id,option.name]));
+    dialog.querySelector("form").addEventListener("input",event=>{
+      const field=event.target;
+      if(!field.dataset.purchaseQty)return;
+      const id=Number(field.dataset.purchaseQty);
+      setItemQuantityStep(field,byId.get(id),true,current.get(id)?.qty);
+    });
   }
 
   function purchaseDetails(p) {
@@ -383,6 +407,7 @@
       const selected=item(Number(itemField.value));
       const source=item(selected.base_id)||selected;
       minimum.value=selected.min_qty;
+      setItemQuantityStep(minimum,selected.name,true,selected.min_qty);
       minimum.closest("label").querySelector("span").textContent=`Cantidad mínima crítica (${selected.unit})`;
       days.value=source.warn_days;
       days.disabled=!source.perishable;
@@ -390,6 +415,10 @@
       updatePreview();
     }
     itemField.addEventListener("change",loadSettings);
+    minimum.addEventListener("input",()=>{
+      const selected=item(Number(itemField.value));
+      setItemQuantityStep(minimum,selected.name,true,selected.min_qty);
+    });
     days.addEventListener("input",updatePreview);
     loadSettings();
   }

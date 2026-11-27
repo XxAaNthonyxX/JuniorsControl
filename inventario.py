@@ -6,6 +6,7 @@ Una reserva sólo inmoviliza un lote; el movimiento físico corresponde al cobro
 from collections import defaultdict
 from datetime import date, datetime, timedelta, timezone
 from decimal import Decimal, InvalidOperation
+import re
 import pyodbc
 import porciones
 
@@ -64,6 +65,20 @@ def _scaled(value, scale, label, low=1, high=1_000_000_000):
 
 def qty(x):
     return _scaled(x, 1000, "Cantidad")
+
+
+def allows_decimal(name):
+    return bool(re.search(r"\b(?:papas?|arroz)\b",name,re.IGNORECASE))
+
+
+def check_item_quantity(name, amount, previous=None):
+    if amount % 1000 and amount != previous and not allows_decimal(name):
+        raise ValueError(f"{name}: ingresa una cantidad entera. Los decimales se permiten para papa y arroz.")
+    return amount
+
+
+def item_quantity(name, value, label="Cantidad", *, minimum=1, previous=None):
+    return check_item_quantity(name,_scaled(value,1000,label,minimum),previous)
 
 
 def num(x):
@@ -280,10 +295,11 @@ def _save_item(db, user, p):
     _role(user, "admin")
     fields = [_text(p.get("name"),"nombre",100), _text(p.get("category"),"categoría",60),
               _item_area(p.get("area")), _text(p.get("unit"),"unidad",20)]
-    fields += [_scaled(p.get("min_qty",0),1000,"Stock mínimo",0),
+    item=_item(db,p["id"]) if p.get("id") else None
+    fields += [item_quantity(fields[0],p.get("min_qty",0),"Stock mínimo",minimum=0,
+                            previous=item["min_qty"] if item else None),
                _scaled(p.get("warn_days",3),1,"Días de aviso",0,3650),
                _bool(p.get("perishable")), _bool(p.get("transformable"))]
-    item=_item(db,p["id"]) if p.get("id") else None
     if item and db.execute("SELECT 1 FROM inv_stock_equivalents WHERE item_id=? OR base_id=?",(item["id"],item["id"])).fetchone():
         if (fields[3],fields[6])!=(item["unit"],item["perishable"]):
             raise ValueError("El stock compartido debe conservar su unidad y tipo de vencimiento.")
@@ -352,7 +368,7 @@ def _menu_category(db,user,p):
     return {}
 
 
-def _save_product(db, user, p):
+def _save_product(db, user, p, *, demo=False):
     _role(user, "admin")
     name = _text(p.get("name"), "nombre")
     cat = _text(p.get("category"), "categoría")
@@ -370,8 +386,10 @@ def _save_product(db, user, p):
     recipe = p.get("recipe")
     if not isinstance(recipe,list) or not 1<=len(recipe)<=100:
         raise ValueError("Agrega entre uno y cien insumos a la receta.")
+    previous={}
     if p.get("id"):
         prod = _id(p["id"])
+        previous=dict(db.execute("SELECT item_id,amount FROM inv_recipes WHERE product_id=?",(prod,)))
         if not db.execute("UPDATE inv_products SET name=?,category=?,price=?,prep_area=? WHERE id=?", (name,cat,price,area,prod)).rowcount:
             raise ValueError("El producto no existe.")
         db.execute("DELETE FROM inv_recipes WHERE product_id=?", (prod,))
@@ -381,8 +399,11 @@ def _save_product(db, user, p):
     for row in recipe:
         if not isinstance(row,dict):
             raise ValueError("Revisa los insumos de la receta.")
-        item = _item(db,row.get("item_id"))["id"]
-        item,amount=porciones.resolve(db,item,qty(row.get("qty")))
+        ingredient = _item(db,row.get("item_id"))
+        requested=qty(row.get("qty"))
+        item,amount=porciones.resolve(db,ingredient["id"],requested)
+        if not demo and previous.get(item)!=amount:
+            check_item_quantity(ingredient["name"],requested)
         if item in added:
             raise ValueError("Agrupa las cantidades del mismo insumo en una línea de receta.")
         added.add(item)
@@ -396,7 +417,11 @@ def _rule(db,user,p):
     target = _item(db,p.get("target_id"))
     if source["id"]==target["id"] or not source["transformable"]:
         raise ValueError("Selecciona un insumo transformable y un producto de destino diferente.")
-    values=(qty(p.get("source_qty")),qty(p.get("target_qty")),source["id"],target["id"])
+    existing=db.execute("SELECT source_qty,target_qty FROM inv_rules WHERE source_id=? AND target_id=?",
+                        (source["id"],target["id"])).fetchone()
+    source_qty=item_quantity(source["name"],p.get("source_qty"),"Cantidad consumida",previous=existing[0] if existing else None)
+    target_qty=item_quantity(target["name"],p.get("target_qty"),"Cantidad producida",previous=existing[1] if existing else None)
+    values=(source_qty,target_qty,source["id"],target["id"])
     if not db.execute("UPDATE inv_rules SET source_qty=?,target_qty=? WHERE source_id=? AND target_id=?",values).rowcount:
         db.execute("INSERT INTO inv_rules(source_qty,target_qty,source_id,target_id) VALUES(?,?,?,?)",values)
     key=db.execute("SELECT id FROM inv_rules WHERE source_id=? AND target_id=?",(source["id"],target["id"])).fetchone()[0]
@@ -1307,7 +1332,7 @@ def act(db,user,action,payload):
         item=_item(db,payload.get("item_id"))
         _in_area(user,item["area"])
         detail=_text(payload.get("reason"),"motivo",300)
-        withdraw(db,user,item["id"],qty(payload.get("qty")),"Consumo · "+detail,item["area"])
+        withdraw(db,user,item["id"],item_quantity(item["name"],payload.get("qty")),"Consumo · "+detail,item["area"])
         return {}
     if action not in routes:
         raise ValueError("Operación de inventario desconocida.")
@@ -1362,7 +1387,7 @@ def init(db,demo=True):
     products={}
     for name,cat,price,recipe in dishes:
         products[name]=_save_product(db,SYSTEM,{"name":name,"category":cat,"price":price,
-                      "recipe":[{"item_id":ids[code],"qty":amount} for code,amount in recipe]})["id"]
+                      "recipe":[{"item_id":ids[code],"qty":amount} for code,amount in recipe]},demo=True)["id"]
     porciones.setup(db,SYSTEM,dict(raw_id=ids["POL-01"],base_id=ids["POL-02"],potato_id=ids["PAP-01"],
         quarter_product_id=products["Cuarto de pollo a la brasa"],half_product_id=products["Medio pollo a la brasa"],
         whole_product_id=products["Pollo entero a la brasa"]))

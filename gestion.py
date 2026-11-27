@@ -521,10 +521,12 @@ def state(db, user):
             WHERE days.day IS NOT NULL ORDER BY days.day DESC""",(inv.business_day(db),))]
         result["cash_expenses"]=[dict(r) for r in db.execute("SELECT * FROM cash_expenses ORDER BY day DESC,id DESC")]
     if receiving:
-        for r in db.execute("""SELECT r.id,r.item_id,i.name item_name,i.unit,r.supplier,r.qty_m,
+        for r in db.execute("""SELECT r.id,r.item_id,i.code item_code,i.name item_name,i.unit,i.area,i.perishable,r.supplier,r.qty_m,
                 r.approved_m,r.received_m,r.reason,r.created,r.actor,r.reviewed_at,r.reviewer,r.unit_cents,
-                r.lot_id,l.expiry,k.purchase_id FROM g_receipts r JOIN inv_items i ON i.id=r.item_id
+                r.lot_id,l.expiry,k.purchase_id,COALESCE(p.purchase_day,LEFT(p.created,10)) purchase_day
+                FROM g_receipts r JOIN inv_items i ON i.id=r.item_id
                 LEFT JOIN g_lines k ON k.id=r.line_id LEFT JOIN inv_lots l ON l.id=r.lot_id
+                LEFT JOIN g_purchases p ON p.id=k.purchase_id
                 ORDER BY CASE WHEN r.approved_m IS NULL THEN 0 ELSE 1 END,r.id DESC"""):
             receipt = _with_code(r, "RC")
             expected, accepted = receipt.pop("qty_m"),receipt.pop("approved_m")
@@ -537,14 +539,16 @@ def state(db, user):
             if not admin:
                 receipt.pop("unit_cents")
             result["receipts"].append(receipt)
-        for r in db.execute("""SELECT p.id,p.receipt_id,r.item_id,i.name item_name,i.unit,r.supplier,
+        for r in db.execute("""SELECT p.id,p.receipt_id,r.item_id,k.purchase_id,i.name item_name,i.unit,r.supplier,
                 r.qty_m,r.received_m,r.approved_m,r.reason,p.created,r.reviewer AS actor,
                 p.resolution,p.closed,p.closer FROM g_incidents p JOIN g_receipts r ON r.id=p.receipt_id
-                JOIN inv_items i ON i.id=r.item_id ORDER BY CASE WHEN p.closed IS NULL THEN 0 ELSE 1 END,p.id DESC"""):
+                JOIN inv_items i ON i.id=r.item_id LEFT JOIN g_lines k ON k.id=r.line_id
+                ORDER BY CASE WHEN p.closed IS NULL THEN 0 ELSE 1 END,p.id DESC"""):
             issue = _with_code(r,"INC")
             expected,received,approved = issue.pop("qty_m"),issue.pop("received_m"),issue.pop("approved_m")
             issue["missing"] = None if received is None else inv.num(max(0,expected-received))
             issue["rejected"] = None if received is None else inv.num(received-approved)
+            issue["kind"] = "Rechazo" if (received or 0) > approved or (received is None and approved == 0) else "Faltante"
             issue["qty"] = inv.num(max(expected,received or 0)-approved)
             issue["status"] = "Resuelta" if issue["closed"] else "Abierta"
             result["incidents"].append(issue)

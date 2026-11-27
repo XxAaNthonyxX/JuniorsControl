@@ -19,6 +19,7 @@
   const note = value => '<p class="muted">'+e(value)+'</p>';
   const metric = (name,value) => '<div class="metric"><span class="muted">'+e(name)+'</span><div class="value">'+e(value)+'</div></div>';
   const group = (...metrics) => '<div class="metrics">'+metrics.join("")+'</div>';
+  let preferredReceipt=null;
 
   function confirmAction(title, text, action, payload, submit, message) {
     modal(title,note(text),()=>run("gestion."+action,payload,message),submit);
@@ -34,17 +35,22 @@
       "Registrar entrega");
   }
 
-  function approveReceipt(r) {
-    const perishable = !!item(r.item_id)?.perishable;
-    modal("Revisar "+r.code,
-      note(r.supplier+" · "+r.item_name+" · "+fmt(r.qty)+" "+r.unit+" previstos.")+
-      input("received","Cantidad entregada por el proveedor ("+r.unit+")","number",r.qty,'required min="0" step="0.001"')+
-      input("approved","Cantidad en buen estado ("+r.unit+")","number",r.qty,'required min="0" max="'+e(r.qty)+'" step="0.001"')+
-      input("expiry",perishable?"Vencimiento del lote aprobado":"Vencimiento, si corresponde","date","","")+
-      input("reason","Motivo si hay unidades faltantes o rechazadas","text","","maxlength=500")+
-      note("Se incorporará la cantidad en buen estado, hasta el total previsto. Una diferencia de entrega o un rechazo genera una inconformidad."),
-      v=>run("gestion.receive",{id:r.id,received:v.received,approved:v.approved,expiry:v.expiry,reason:v.reason},"Revisión registrada"),
-      "Confirmar revisión");
+  function reviewReceipt(r, approve) {
+    const verb=approve?"Aprobar recepción":"Solicitar rechazo";
+    const summary=[r.purchase_id?label("OC",r.purchase_id):r.code,r.supplier,
+      r.item_code,r.item_name,`${fmt(r.qty)} ${r.unit} previstos`].filter(Boolean).join(" · ");
+    const cost=r.unit_cents!=null?note(`Costo unitario ${money(r.unit_cents)}`):"";
+    const received=input("received",`Cantidad entregada (${r.unit})`,"number",r.qty,'required min="0" step="0.001"');
+    const approval=approve?input("approved",`Cantidad en buen estado (${r.unit})`,"number",r.qty,
+      `required min="0.001" max="${e(r.qty)}" step="0.001"`)+
+      input("expiry",r.perishable?"Vencimiento del lote aprobado":"Vencimiento, si corresponde","date","",r.perishable?"required":""):"";
+    modal(`${verb} · ${r.item_name}`,note(summary)+cost+received+approval+
+      input("reason",approve?"Motivo si hay faltantes o unidades rechazadas":"Motivo del rechazo","text","",
+        approve?"maxlength=500":"required maxlength=500")+
+      note(approve?"Solo la cantidad aprobada ingresará al stock. Las diferencias quedarán como solicitudes pendientes.":
+        "La solicitud quedará pendiente para que Administración gestione el rechazo con el proveedor."),
+      v=>run("gestion.receive",{id:r.id,received:v.received,approved:approve?v.approved:"0",expiry:v.expiry,reason:v.reason},
+        approve?"Recepción aprobada · stock actualizado":"Solicitud de rechazo registrada"),verb);
   }
 
   function resolveIncident(x) {
@@ -53,22 +59,55 @@
       v=>run("gestion.resolve",{id:x.id,resolution:v.resolution},"Inconformidad resuelta"),"Resolver");
   }
 
+  function receiptTable(deliveries) {
+    return table(["Producto","Cantidad prevista","Revisión","Acciones"],deliveries.map(r=>[
+      `<strong>${e(r.item_name)}</strong>`+sub([r.item_code,r.area,r.code,r.purchase_id?null:r.supplier].filter(Boolean).join(" · ")),
+      e(fmt(r.qty)+" "+r.unit),
+      badge(r.status)+(r.approved!==null?sub((r.received!=null?fmt(r.received)+" entregados · ":"")+
+        fmt(r.approved)+" "+r.unit+" aprobados")+sub(when(r.reviewed_at)+" · "+r.reviewer):""),
+      r.status==="Pendiente"?actions(
+        button("Aprobar recepción",()=>reviewReceipt(r,true),"primary"),
+        button("Solicitar rechazo",()=>reviewReceipt(r,false))
+      ):(r.lot_id?muted(label("LT",r.lot_id)+(r.expiry?" · Vence "+date(r.expiry):"")):""),
+    ]),"Las entregas pendientes de validación aparecerán aquí.");
+  }
+
+  function receiptGroups(deliveries) {
+    const groups=new Map();
+    for(const receipt of deliveries){
+      const id=receipt.purchase_id??null;
+      if(!groups.has(id))groups.set(id,[]);
+      groups.get(id).push(receipt);
+    }
+    const order=[...groups.keys()];
+    if(preferredReceipt!=null&&groups.has(preferredReceipt)){
+      order.splice(order.indexOf(preferredReceipt),1);
+      order.unshift(preferredReceipt);
+    }
+    return order.map(id=>{
+      const list=groups.get(id);
+      const first=list[0];
+      const done=list.filter(r=>r.status!=="Pendiente").length;
+      const title=id?`Orden ${label("OC",id)} · ${first.supplier}`:"Entregas manuales";
+      const subtitle=id?`Lote del ${date(first.purchase_day)} · ${done} de ${list.length} productos revisados`:
+        `${done} de ${list.length} productos revisados`;
+      return `<section><h3>${e(title)}</h3>${note(subtitle)}${receiptTable(list)}</section>`;
+    }).join("");
+  }
+
   pages.recepcion = () => {
     const deliveries = rows("receipts");
     const issues = rows("incidents");
     return stack(group(metric("Pendientes de revisión",deliveries.filter(x=>x.status==="Pendiente").length),
-      metric("Inconformidades abiertas",issues.filter(x=>!x.closed).length)),
-      panel("Entregas de proveedores", table(["Entrega","Insumo","Cantidad","Revisión",""],deliveries.map(x=>[
-        e(x.code)+sub(when(x.created)+" · "+x.actor),e(x.item_name)+sub(x.supplier),e(fmt(x.qty)+" "+x.unit),
-        badge(x.status)+(x.approved!==null?sub((x.received!=null?fmt(x.received)+" entregados · ":"")+fmt(x.approved)+" "+x.unit+" aprobados")+
-          sub(when(x.reviewed_at)+" · "+x.reviewer):""),
-        x.status==="Pendiente"?button("Revisar",()=>approveReceipt(x)):(x.lot_id?muted(label("LT",x.lot_id)):"")
-      ]),"Las entregas pendientes de validación aparecerán aquí."),button("Registrar entrega",newReceipt,"primary")),
-      panel("Inconformidades", table(["Informe","Insumo y proveedor","Diferencia","Motivo y seguimiento","Estado"],issues.map(x=>[
-        e(x.code)+sub(label("RC",x.receipt_id))+sub(when(x.created)+" · "+x.actor),e(x.item_name)+sub(x.supplier),e(fmt(x.qty)+" "+x.unit)+
+      metric("Solicitudes pendientes",issues.filter(x=>!x.closed).length)),
+      panel("Entregas de proveedores",deliveries.length?stack(receiptGroups(deliveries)):receiptTable([]),
+        button("Registrar entrega",newReceipt,"primary")),
+      panel("Solicitudes de rechazo y diferencias",table(["Solicitud","Insumo y proveedor","Diferencia","Motivo y seguimiento","Estado"],issues.map(x=>[
+        e(x.code)+sub(x.kind)+sub([x.purchase_id?label("OC",x.purchase_id):"",label("RC",x.receipt_id)].filter(Boolean).join(" · "))+
+        sub(when(x.created)+" · "+x.actor),e(x.item_name)+sub(x.supplier),e(fmt(x.qty)+" "+x.unit)+
         (x.missing!=null?sub(fmt(x.missing)+" faltantes · "+fmt(x.rejected)+" rechazados"):""),e(x.reason)+
         (x.resolution?sub(x.resolution)+sub(when(x.closed)+" · "+x.closer):""),
-        actions(badge(x.status),admin()&&!x.closed?button("Resolver",()=>resolveIncident(x)):"")
+        actions(badge(x.closed?"Resuelta":"Pendiente"),admin()&&!x.closed?button("Resolver solicitud",()=>resolveIncident(x)):"")
       ]),"Aún no se han registrado diferencias de recepción.")));
   };
 
@@ -218,6 +257,16 @@
     window.print();
   }
 
+  function confirmPurchase(purchase) {
+    modal("Confirmar compra · "+purchase.code,
+      note(`Se comprometerán ${money(purchase.total_cents)}. En Recepción aparecerá una fila por insumo de ${purchase.supplier}.`),
+      async ()=>{
+        await run("gestion.dispatch",{id:purchase.id,version:purchase.version},"Compra confirmada · recepción pendiente");
+        preferredReceipt=purchase.id;
+        go("recepcion");
+      },"Confirmar compra");
+  }
+
   function purchaseActions(p) {
     const draft=p.status==="Borrador";
     const info=button("Detalle",()=>purchaseDetails(p));
@@ -230,9 +279,7 @@
     if (p.status==="Aprobada") return actions(info,button("Volver a borrador",()=>confirmAction("Revisar "+p.code,
       "Podrás corregir la cotización y aprobarla de nuevo antes de cursar la compra.",
       "reopen",{id:p.id,version:p.version},"Volver a borrador","Hoja de compra abierta para revisión")),
-      button("Cursar compra",()=>confirmAction("Cursar "+p.code,
-      "Se comprometerán "+money(p.total_cents)+" y se crearán las recepciones esperadas. Entrega la orden a "+p.supplier+" por el canal acordado.",
-      "dispatch",{id:p.id,version:p.version},"Cursar compra","Compra cursada; recepciones generadas")));
+      button("Confirmar compra",()=>confirmPurchase(p),"primary"));
     const supplement=["Enviada","Recibida"].includes(p.status)?
       button("Agregar insumos",()=>purchaseForm(null,{source:p})):"";
     return actions(info,supplement);

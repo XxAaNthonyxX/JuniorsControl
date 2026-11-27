@@ -256,7 +256,7 @@ async function refreshSession(){
    const notice=observeAlerts(fresh,false);
    if(notice)toast(notice);
    const editing=document.querySelector("#dialog").open||["INPUT","SELECT","TEXTAREA"].includes(document.activeElement.tagName);
-   if(!editing&&(fresh.today!==S.today||["jornadas","ventas","atencion","comandas","preparacion","solicitudes","alertas"].includes(route))){S=fresh;render()}
+   if(!editing&&(fresh.today!==S.today||["jornadas","ventas","atencion","comandas","preparacion","solicitudes","alertas","recepcion"].includes(route))){S=fresh;render()}
  }catch{}finally{checkingSession=false}
 }
 setInterval(refreshSession,30000);

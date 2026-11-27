@@ -14,7 +14,8 @@ import inventario as inv
 
 LIMA = timezone(timedelta(hours=-5))
 MAX_CENTS = 10**11
-PURCHASE_ROLES = ("admin", "caja", "area", "recepcion")
+PURCHASE_ROLES = ("admin", "caja", "area")
+WASTE_ROLES = ("admin", "area")
 
 
 def stamp():
@@ -62,12 +63,6 @@ def _accessible(user, area):
     if user["role"] in ("area","atencion"):
         return area in inv.inventory_access_areas(user)
     return True
-
-
-def _waste_accessible(user, area):
-    if user["role"] == "recepcion":
-        return area in inv.inventory_access_areas(user)
-    return _accessible(user, area)
 
 
 def _amount(qty_m, unit_cents):
@@ -206,9 +201,9 @@ def reserve_pending_wastes(db):
 
 
 def _waste(db, user, p):
-    _require(user, "admin", "area", "recepcion")
+    _require(user, *WASTE_ROLES)
     item = _item(db, p.get("item_id"))
-    if not _waste_accessible(user, item["area"]):
+    if not _accessible(user, item["area"]):
         raise PermissionError("El insumo pertenece a otra área.")
     if p.get("lot_id") in (None,""):
         raise ValueError("Selecciona el lote afectado.")
@@ -773,10 +768,10 @@ def state(db, user):
             issue["status"] = ("Admitida" if issue["decision"] else "Denegada" if issue["decision"]==0
                                else "Resuelta" if issue["closed"] else "Pendiente")
             result["incidents"].append(issue)
-    if user["role"] in {"admin","recepcion","area"}:
+    if user["role"] in WASTE_ROLES:
         for r in db.execute("""SELECT w.*,i.name item_name,i.unit,i.display_unit,i.display_unit_milli,i.area FROM g_wastes w
                   JOIN inv_items i ON i.id=w.item_id ORDER BY CASE WHEN w.status='Pendiente' THEN 0 ELSE 1 END,w.id DESC"""):
-            if _waste_accessible(user,r["area"]):
+            if _accessible(user,r["area"]):
                 waste = _with_code(r,"ME")
                 waste["qty"] = inv.num(waste.pop("qty_m"))
                 result["wastes"].append(waste)

@@ -57,7 +57,7 @@
   }
 
   function reviewReceipt(r, approve) {
-    const verb=approve?"Aprobar recepción":"Solicitar rechazo";
+    const verb=approve?"Aprobar recepción":"Rechazar recepción";
     const summary=[r.purchase_id?label("OC",r.purchase_id):r.code,r.supplier,
       r.item_code,r.item_name,`${qtyText(r,r.qty)} previstos`].filter(Boolean).join(" · ");
     const cost=r.unit_cents!=null?note(`Costo por ${r.unit} ${money(r.unit_cents)}`):"";
@@ -100,7 +100,7 @@
         qtyText(r,r.approved)+" aprobados")+sub(when(r.reviewed_at)+" · "+r.reviewer):""),
       r.status==="Pendiente"&&canReceive()?actions(
         button("Aprobar recepción",()=>reviewReceipt(r,true),"primary"),
-        button("Solicitar rechazo",()=>reviewReceipt(r,false))
+        button("Rechazar recepción",()=>reviewReceipt(r,false))
       ):(r.lot_id?muted(label("LT",r.lot_id)+(r.expiry?" · Vence "+date(r.expiry):"")):""),
     ]),"Las entregas pendientes de validación aparecerán aquí.");
   }
@@ -250,7 +250,7 @@
       critical:x.available<=x.min_qty,
     })).sort((a,b)=>Number(b.critical)-Number(a.critical)||a.name.localeCompare(b.name,"es")):
       p.lines.map(x=>({...x,name:x.item_name}));
-    const delegables=[["","Sin asignar"],...rows("users").filter(x=>x.active&&x.role!=="atencion").map(x=>[x.id,x.name])];
+    const delegables=[["","Sin asignar"],...rows("users").filter(x=>x.active&&["admin","caja","area"].includes(x.role)).map(x=>[x.id,x.name])];
     const assigned=admin()?select("assignee_id","Responsable delegado",delegables,p?.assignee_id||source?.assignee_id||""):"";
     const headers=admin()?["Insumo","Existencias","Cantidad","S/ por unidad"]:["Insumo","Cantidad","S/ por unidad"];
     const lines = table(headers,options.map(x=>{

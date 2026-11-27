@@ -14,7 +14,7 @@ import inventario as inv
 
 LIMA = timezone(timedelta(hours=-5))
 MAX_CENTS = 10**11
-PURCHASE_ROLES = ("admin", "caja", "area")
+PURCHASE_ROLES = ("admin", "caja")
 WASTE_ROLES = ("admin", "area")
 
 
@@ -320,19 +320,11 @@ def _check_purchase_version(purchase, payload):
         raise ValueError("La hoja de compra cambió desde que la abriste. Cierra el formulario, actualiza y revisa la cotización.")
 
 
-_OUTSIDE_PURCHASE_AREA = """SELECT 1 FROM g_lines area_line JOIN inv_items area_item ON area_item.id=area_line.item_id
-                            WHERE area_line.purchase_id={purchase} AND area_item.area<>?"""
-
-
 def _edit_purchase(db, user, p):
     _require(user, *PURCHASE_ROLES)
     purchase = _one(db,"SELECT * FROM g_purchases WHERE id=?",_int(p.get("id"), "compra", 1))
     if user["role"] != "admin" and purchase["assignee_id"] != user["id"]:
         raise PermissionError("Solo administración o el responsable delegado puede editar la compra.")
-    if user["role"] == "area":
-        areas = inv.inventory_access_areas(user)
-        if not areas or db.execute(_OUTSIDE_PURCHASE_AREA.format(purchase="?"), (purchase["id"], areas[0])).fetchone():
-            raise PermissionError("La hoja incluye insumos de otra área.")
     sent=purchase["status"] in ("Enviada","Recibida")
     if not sent and purchase["status"]!="Borrador":
         raise ValueError("Abre la hoja aprobada como borrador para corregirla.")
@@ -786,15 +778,8 @@ def state(db, user):
     if not admin:
         query += " WHERE p.assignee_id=?"
         assignee_args = (user["id"],)
-    args = assignee_args
-    if user["role"] == "area":
-        areas = inv.inventory_access_areas(user)
-        if not areas:
-            return result
-        query += " AND NOT EXISTS (" + _OUTSIDE_PURCHASE_AREA.format(purchase="p.id") + ")"
-        args += (areas[0],)
     purchases = {}
-    for r in db.execute(query+" ORDER BY p.id DESC",args):
+    for r in db.execute(query+" ORDER BY p.id DESC",assignee_args):
         purchase = _with_code(r,"OC")
         purchase["purchase_day"] = purchase["purchase_day"] or purchase["created"][:10]
         purchase.update(lines=[], total_cents=0)

@@ -1530,7 +1530,12 @@ def state(db,user,day):
         result["portion_groups"]=[dict(r) for r in db.execute("SELECT * FROM inv_portion_groups")]
         result["next_item_code"]=_next_item_code(db,1+max((i["id"] for i in all_items),default=0))
     if user["role"]=="area":
-        result["area_menu"]=[dict(r) for r in db.execute("SELECT name,category FROM inv_products WHERE prep_area=? ORDER BY category,name",(responsible_area(_area(user)),))]
+        result["area_menu"] = [
+            dict(row) for row in db.execute(
+                "SELECT name,category FROM inv_products WHERE prep_area=? ORDER BY category,name",
+                assigned_areas,
+            )
+        ] if assigned_areas else []
     if can_order:
         result["menu_categories"]=[r[0] for r in db.execute("SELECT name FROM menu_categories UNION SELECT category FROM inv_products ORDER BY 1")]
         result["service_requests"]=_service_requests(db,user)

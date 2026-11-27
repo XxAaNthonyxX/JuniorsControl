@@ -250,7 +250,7 @@
       critical:x.available<=x.min_qty,
     })).sort((a,b)=>Number(b.critical)-Number(a.critical)||a.name.localeCompare(b.name,"es")):
       p.lines.map(x=>({...x,name:x.item_name}));
-    const delegables=[["","Sin asignar"],...rows("users").filter(x=>x.active&&["admin","caja","area"].includes(x.role)).map(x=>[x.id,x.name])];
+    const delegables=[["","Sin asignar"],...rows("users").filter(x=>x.active&&["admin","caja"].includes(x.role)).map(x=>[x.id,x.name])];
     const assigned=admin()?select("assignee_id","Responsable delegado",delegables,p?.assignee_id||source?.assignee_id||""):"";
     const headers=admin()?["Insumo","Existencias","Cantidad","S/ por unidad"]:["Insumo","Cantidad","S/ por unidad"];
     const lines = table(headers,options.map(x=>{

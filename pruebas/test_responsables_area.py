@@ -51,7 +51,7 @@ class TestResponsablesPorArea(TestCase):
     def test_reporta_y_consulta_mermas_de_su_area(self):
         db = Mock()
         wastes = [{"id": 2, "qty_m": 1000, "area": "Parrillas"}, {"id": 3, "qty_m": 2000, "area": "Brasas"}]
-        db.execute.side_effect = [Cursor(rows=wastes), Cursor(), Cursor()]
+        db.execute.side_effect = [Cursor(rows=wastes), Cursor()]
         result = gestion.state(db, self.parrillas)
         self.assertEqual([waste["code"] for waste in result["wastes"]], ["ME0002"])
         with patch.object(gestion, "_item", return_value={"area": "Brasas"}):
@@ -59,3 +59,62 @@ class TestResponsablesPorArea(TestCase):
                 gestion._waste(db, self.parrillas, {"item_id": 4, "lot_id": 2})
         with self.assertRaises(PermissionError):
             gestion._review_waste(db, self.parrillas, {"id": 2, "approve": True})
+
+    def test_encargados_no_acceden_a_compras_y_solo_reciben_alertas_de_su_area(self):
+        actions = ("purchase", "edit_purchase", "decide", "reopen", "dispatch", "send_purchase_list", "report")
+        alerts = [{"id": i, "area": area} for i, area in enumerate(inv.INVENTORY_AREAS, 1)]
+        for alert in alerts:
+            area = alert["area"]
+            user = dict(self.parrillas, area=area)
+            with self.subTest(area=area):
+                db = Mock()
+                for action in actions:
+                    with self.subTest(action=action), self.assertRaises(PermissionError):
+                        gestion.act(db, user, "gestion." + action, {"id": 12})
+                db.execute.assert_not_called()
+
+                db.execute.side_effect = [Cursor(), Cursor(rows=alerts)]
+                state = gestion.state(db, user)
+                self.assertEqual(state["purchases"], [])
+                self.assertEqual([row["id"] for row in state["alerts"]], [alert["id"]])
+                self.assertEqual(db.execute.call_count, 2)
+
+        db = Mock()
+        db.execute.return_value = Cursor(row={"id": self.parrillas["id"], "role": "area"})
+        with self.assertRaisesRegex(ValueError, "persona autorizada"):
+            gestion._assignee(db, self.parrillas["id"])
+
+    def test_carta_por_area_solo_expone_productos_y_categorias_asignadas(self):
+        db = Mock()
+        menus = {
+            "Orientales": [{"name": "Chaufa de pollo", "category": "Arroces"}],
+            "Brasas": [{"name": "Pollo entero a la brasa", "category": "Brasas"}],
+            "Parrillas": [{"name": "Parrilla personal", "category": "Carnes"}],
+            "Barra": [{"name": "Chicha morada", "category": "Bebidas"}],
+        }
+
+        def execute(query, args=()):
+            if "FROM inv_products" in query:
+                self.assertIn("WHERE prep_area=?", query)
+                return Cursor(rows=menus.get(args[0], []))
+            return Cursor()
+
+        db.execute.side_effect = execute
+        with (patch.object(inv, "stock", return_value=[]),
+              patch.object(inv, "batches", return_value=[])):
+            for area in (*inv.INVENTORY_AREAS, "Horno", ""):
+                with self.subTest(area=area):
+                    state = inv.state(db, dict(self.parrillas, area=area), "2026-11-30")
+                    self.assertEqual(state["area_menu"], menus.get("Brasas" if area == "Horno" else area, []))
+                    self.assertEqual(state["products"], [])
+                    self.assertNotIn("menu_categories", state)
+
+    def test_encargado_no_puede_editar_la_carta_las_categorias_ni_las_alertas(self):
+        db = Mock()
+        with self.assertRaises(PermissionError):
+            inv.act(db, self.parrillas, "inv.product", {"id": 1})
+        with self.assertRaises(PermissionError):
+            inv.act(db, self.parrillas, "inv.menu_category", {"previous": "Carnes", "name": "Parrillas"})
+        with self.assertRaises(PermissionError):
+            gestion.act(db, self.parrillas, "gestion.configure_alerts", {"item_id": 1})
+        db.execute.assert_not_called()

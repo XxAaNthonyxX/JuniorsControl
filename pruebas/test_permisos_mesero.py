@@ -27,7 +27,7 @@ class TestPermisosMesero(TestCase):
         db.execute.return_value = Cursor(row={"id": WAITER["id"], "role": "atencion"})
         with self.assertRaisesRegex(ValueError, "persona autorizada"):
             gestion._assignee(db, WAITER["id"])
-        db.execute.return_value = Cursor(row={"id": 3, "role": "area"})
+        db.execute.return_value = Cursor(row={"id": 3, "role": "caja"})
         self.assertEqual(gestion._assignee(db, 3), 3)
 
     def test_inventario_del_mesero_usa_solo_limpieza_y_atencion(self):

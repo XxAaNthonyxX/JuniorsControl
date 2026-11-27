@@ -231,7 +231,7 @@
       v=>run("inv.menu_category",{name:v.name,previous},"Categoría guardada"));
   }
   pages.carta=()=>{
-    if(S.user.role==="area")return panel("Productos de "+S.user.area,table(["Producto","Categoría"],
+    if(S.user.role==="area")return panel(S.areas.length?"Productos de "+S.areas[0]:"Productos asignados",table(["Producto","Categoría"],
       (S.area_menu||[]).map(p=>[h(p.name),h(p.category)]),"Todavía no hay productos asignados a esta área."));
     return productPanel()+panel("Categorías",table(["Categoría","Acción"],S.menu_categories.map(c=>[h(c),button("Renombrar",()=>categoryForm(c),"link")])),
       button("Nueva categoría",()=>categoryForm(""),"primary"));

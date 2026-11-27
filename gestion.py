@@ -14,6 +14,7 @@ import inventario as inv
 
 LIMA = timezone(timedelta(hours=-5))
 MAX_CENTS = 10**11
+PURCHASE_ROLES = ("admin", "caja", "area", "recepcion")
 
 
 def stamp():
@@ -281,8 +282,11 @@ def _put_lines(db, purchase_id, lines):
 def _assignee(db, value):
     if value in (None,"",0,"0"):
         return None
-    return _one(db,"SELECT id FROM users WHERE id=? AND active=1",
-                _int(value, "responsable", 1))[0]
+    delegate = _one(db,"SELECT id,role FROM users WHERE id=? AND active=1 AND deleted=0",
+                    _int(value, "responsable", 1))
+    if delegate["role"] not in PURCHASE_ROLES:
+        raise ValueError("Elige una persona autorizada para compras.")
+    return delegate["id"]
 
 def _purchase_day(purchase):
     return purchase["purchase_day"] or purchase["created"][:10]
@@ -326,6 +330,7 @@ _OUTSIDE_PURCHASE_AREA = """SELECT 1 FROM g_lines area_line JOIN inv_items area_
 
 
 def _edit_purchase(db, user, p):
+    _require(user, *PURCHASE_ROLES)
     purchase = _one(db,"SELECT * FROM g_purchases WHERE id=?",_int(p.get("id"), "compra", 1))
     if user["role"] != "admin" and purchase["assignee_id"] != user["id"]:
         raise PermissionError("Solo administración o el responsable delegado puede editar la compra.")
@@ -779,6 +784,8 @@ def state(db, user):
             FROM g_alerts a JOIN inv_items i ON i.id=a.item_id ORDER BY CASE WHEN a.closed IS NULL THEN 0 ELSE 1 END,a.id DESC"""):
         if _accessible(user,r["area"]):
             result["alerts"].append(_with_code(r,"AL"))
+    if user["role"] not in PURCHASE_ROLES:
+        return result
     query = """SELECT p.*,u.name assignee FROM g_purchases p LEFT JOIN users u ON p.assignee_id=u.id"""
     assignee_args = ()
     if not admin:

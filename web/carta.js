@@ -106,10 +106,11 @@ function menuCards(){
  const products=S.products.filter(p=>(menuCategory==="Todos"||menuCategory===p.category)&&norm(p.name+" "+p.code).includes(norm(menuQuery)));
  if(!products.length)return `<div class="empty-state">No se encontraron productos. ${S.products.length?"Prueba otra búsqueda.":S.user.role==="admin"?"Añade la receta desde Inventario.":""}</div>`;
  const stock=stockForMenu(replacementSlot());
+ const showStock=S.user.role!=="atencion";
  return `<div class="menu-grid">${products.map(p=>{
  const {available:left,portions,limitingNames}=menuAvailability(p,stock);
- const chicken=portions==null?"":`<small>Pollo cocido para ${fmt(portions)} de esta presentación</small>`;
- const limit=portions>left&&limitingNames.length?`<small>Limitado por ${h(limitingNames.join(", "))}</small>`:"";
+ const chicken=showStock&&portions!=null?`<small>Pollo cocido para ${fmt(portions)} de esta presentación</small>`:"";
+ const limit=showStock&&portions>left&&limitingNames.length?`<small>Limitado por ${h(limitingNames.join(", "))}</small>`:"";
  return `<article class="food-card"><div class="food-photo">${p.id<=6&&S.demo_assets!==false&&p.name===["Cuarto de pollo a la brasa","Medio pollo a la brasa","Parrilla personal","Chaufa de pollo","Chicha morada","Gaseosa personal"][p.id-1]?`<img src="/carta-${p.id}.jpg" alt="${h(p.name)}">`:`<div class="food-placeholder">${icon("plate")}</div>`}<span class="food-category">${h(p.category)}</span></div><div class="food-info"><span class="product-code">${h(p.code)}</span><h3>${h(p.name)}</h3><div class="food-base"><div><b>${cash(priceFor(p))}</b><small class="${left<=0?"out":""}">${left>0?`${fmt(left)} platos disponibles`:"Sin platos disponibles"}</small>${chicken}${limit}${S.user.role==="admin"?button("Ver disponibilidad",()=>productStock(p),"link"):""}</div><button type="button" class="add" aria-label="Añadir ${h(p.name)}" ${left>0?bind(()=>addDetail(p)):"disabled"}>+</button></div></div></article>`}).join("")}</div>`;
 }
 function jumpTo(selector){

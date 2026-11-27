@@ -15,6 +15,7 @@ LIMA = timezone(timedelta(hours=-5))
 SYSTEM = {"id": 0, "name": "Sistema", "role": "admin", "area": ""}
 PREPARATION_AREAS = ("Brasas", "Parrillas", "Barra", "Orientales")
 INVENTORY_AREAS = (*PREPARATION_AREAS, "Limpieza y Atención")
+ATTENTION_AREA = "Atención"
 PAYMENT_METHODS = ("Efectivo", "Yape", "Tarjeta")
 SMALL_STOCK_UNITS = (
     dict.fromkeys(("kg","kgs","kilo","kilos","kilogramo","kilogramos"),"g")
@@ -163,7 +164,9 @@ def _role(user, *roles):
 
 
 def _area(user):
-    return user.get("area") or {"recepcion": "Limpieza", "atencion": "Atención"}.get(user["role"], "")
+    if user["role"] == "atencion":
+        return ATTENTION_AREA
+    return user.get("area") or ("Limpieza" if user["role"] == "recepcion" else "")
 
 
 def _item_area(value):
@@ -1314,19 +1317,14 @@ def _history(db,user,p,recent=False):
     area=p.get("area")
     restricted=user["role"] not in ("admin","caja","recepcion")
     if restricted:
-        inventory_areas=inventory_access_areas(user)
-        is_responsible=user["role"]=="area"
-        names=inventory_areas if is_responsible else (*inventory_areas,_area(user))
-        history_areas={name.casefold() for name in names if name}
+        history_areas={name.casefold() for name in inventory_access_areas(user)}
         if area and area.casefold() not in history_areas:
             raise PermissionError("El insumo pertenece a otra área.")
         area_keys=sorted(history_areas) if not area else [area.casefold()]
         if not area_keys:
             return []
         placeholders=",".join("?" for _ in area_keys)
-        area_column="i.area" if is_responsible else "c.area"
-        area_filter=f"LOWER({area_column}) IN ({placeholders})"
-        conditions.append(area_filter)
+        conditions.append(f"LOWER(i.area) IN ({placeholders})")
         args.extend(area_keys)
     elif area:
         conditions.append("c.area=?")
@@ -1335,13 +1333,7 @@ def _history(db,user,p,recent=False):
         source_id,_=porciones.resolve(db,_id(p["item_id"]),0)
         item=_item(db,source_id)
         if restricted and item["area"].casefold() not in area_keys:
-            if user["role"]=="area":
-                raise PermissionError("El insumo pertenece a otra área.")
-            previous=db.execute("""SELECT 1 FROM inv_move_context c JOIN inv_moves m ON m.id=c.move_id
-                                   JOIN inv_lots l ON l.id=m.lot_id WHERE """+area_filter+" AND l.item_id=?",
-                                (*area_keys,item["id"])).fetchone()
-            if not previous:
-                raise PermissionError("El insumo pertenece a otra área.")
+            raise PermissionError("El insumo pertenece a otra área.")
         conditions.append("i.id=?")
         args.append(item["id"])
     query="""SELECT m.id,m.at,m.lot_id,m.delta AS qty,m.reason,m.ref,m.operator,

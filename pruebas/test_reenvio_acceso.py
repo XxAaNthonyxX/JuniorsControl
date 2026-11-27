@@ -41,7 +41,7 @@ class TestReenvioAcceso(TestCase):
         db.execute.assert_any_call("DELETE FROM auth_invites WHERE email=?", (self.email,))
         query, values = db.execute.call_args.args
         self.assertTrue(query.startswith("INSERT INTO auth_invites"))
-        self.assertEqual(values[:3], (self.email, "atencion", ""))
+        self.assertEqual(values[:3], (self.email, "atencion", "Atención"))
         self.assertTrue(acceso._valid_code({"digest": values[3], "attempts": 0}, {"code": "123456"}))
 
     def test_solo_administracion_puede_reenviar_y_la_cuenta_debe_estar_activa(self):

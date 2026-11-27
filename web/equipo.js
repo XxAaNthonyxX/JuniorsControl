@@ -21,12 +21,15 @@
     const help = form.querySelector("[data-area-help]");
     const update = selected => {
       const responsible = role.value === "area";
-      const areas = (responsible ? S.areas : S.staff_areas) || [];
+      const attendant = role.value === "atencion";
+      const areas = attendant ? ["Atención"] : (responsible ? S.areas : S.staff_areas) || [];
       area.required = responsible;
+      area.disabled = attendant;
       area.replaceChildren(new Option(responsible ? "Selecciona un área" : "Sin asignar", ""),
         ...areas.map(name => new Option(name, name)));
-      area.value = areas.includes(selected) ? selected : "";
-      help.textContent = responsible ? "El responsable verá los pedidos, insumos y mermas de su área." : "";
+      area.value = attendant ? "Atención" : areas.includes(selected) ? selected : "";
+      help.textContent = responsible ? "El responsable verá los pedidos, insumos y mermas de su área." :
+        attendant ? "Atención puede consultar y usar los insumos de Limpieza y Atención." : "";
     };
     role.addEventListener("change", () => update(area.value));
     update(record.area);

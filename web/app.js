@@ -14,7 +14,7 @@ const nav = [
   ["movimientos","Movimientos","flow","",Object.keys(roleNames),"Movimientos","Sigue las entradas y salidas de insumos por fecha."],
   ["recepcion","Recepción","truck","",["admin","recepcion","caja"],"Recepción","Valida las entregas y registra las diferencias con el proveedor."],
   ["mermas","Mermas","leaf","",["admin","recepcion","area"],"Mermas","Registra pérdidas y revisa los descartes pendientes."],
-  ["compras","Compras","basket","GESTIÓN",Object.keys(roleNames),"Compras y presupuesto","Consulta las órdenes y los informes de reposición."],
+  ["compras","Compras","basket","GESTIÓN",["admin","caja","area","recepcion"],"Compras y presupuesto","Consulta las órdenes y los informes de reposición."],
   ["alertas","Alertas","bell","",Object.keys(roleNames),"Alertas de inventario","Revisa los avisos de stock mínimo y vencimiento."],
   ["equipo","Equipo y correo","team","",["admin"],"Equipo y correo","Configura el registro por Gmail y el acceso del personal."],
   ["dispositivos","Dispositivos","devices","",["admin"],"Conectar dispositivos","Abre Juniors desde otras computadoras y tabletas de la red del local."]

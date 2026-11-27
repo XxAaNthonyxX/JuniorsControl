@@ -29,7 +29,7 @@
   function invitePerson(record = {}) {
     const fields = input("email", "Correo de la persona", "email", record.email || "",
       'required maxlength="254" autocomplete="off"') + assignmentFields(record)
-      + '<p class="muted full">Junior’s enviará un enlace de activación y un código de 8 dígitos válido por 24 horas. Al reenviar, el código anterior caduca.</p>';
+      + '<p class="muted full">Junior’s enviará un enlace de activación y un código de 6 dígitos válido por 24 horas. Al reenviar, el código anterior caduca.</p>';
     modal(record.email ? "Reenviar invitación" : "Invitar a una persona", fields,
       values => run("invite", values, "Invitación enviada por Gmail."), "Enviar invitación");
   }

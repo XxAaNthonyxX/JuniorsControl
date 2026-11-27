@@ -192,7 +192,7 @@ def _send_code(sender, protected, recipient, code, *, recovery=False, activation
     else:
         body = f"Tu código de registro es {code}. Es válido durante 24 horas."
         if activation_url:
-            body += f"\n\nDesde la red del local, abre este enlace para activar tu cuenta:\n{activation_url}"
+            body += f"\n\nConéctate a la red indicada por Administración y abre este enlace para activar tu cuenta:\n{activation_url}"
         else:
             body += "\n\nIntroduce el código en la pantalla de creación de tu cuenta."
     message.set_content(body)

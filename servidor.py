@@ -41,6 +41,19 @@ APP_ID = "juniors-sqlserver-" + hashlib.sha256(
 PRIVATE_NETS = tuple(IPv4Network(net) for net in ("10.0.0.0/8","172.16.0.0/12","192.168.0.0/16"))
 
 
+def public_origin(value):
+    # Una dirección fija para el proxy HTTPS local. Se usa en Host e invitaciones.
+    address = re.fullmatch(
+        r"https://([a-z0-9](?:[a-z0-9-]*[a-z0-9])?(?:\.[a-z0-9](?:[a-z0-9-]*[a-z0-9])?)+)(?::([0-9]{1,5}))?/?",
+        value.strip().lower(),
+    )
+    if address:
+        host, port = address.groups()
+        if host.endswith(".ts.net") and (port is None or int(port) in (443,8443,10000)):
+            return f"https://{host}" + (f":{int(port)}" if port and int(port)!=443 else "")
+    raise argparse.ArgumentTypeError("Indica la dirección HTTPS de Tailscale Funnel (dominio .ts.net).")
+
+
 class LocalServer(ThreadingHTTPServer):
     allow_reuse_address = False
     # Varios navegadores pueden abrir sus recursos en paralelo al comenzar el turno.
@@ -144,10 +157,17 @@ class Handler(BaseHTTPRequestHandler):
         return cookie["__Host-juniors"].value if "__Host-juniors" in cookie else ""
 
     def valid_host(self):
-        return self.headers.get("Host","").lower() in self.server.allowed_hosts
+        host = self.headers.get("Host","").lower()
+        if host == self.server.public_host:
+            return (IPv4Address(self.client_address[0]).is_loopback and
+                    self.headers.get("X-Forwarded-Host","").lower() == host and
+                    self.headers.get("X-Forwarded-Proto") == "https")
+        return "X-Forwarded-Host" not in self.headers and host in self.server.allowed_hosts
 
     def from_primary(self):
-        return IPv4Address(self.client_address[0]).is_loopback
+        return (IPv4Address(self.client_address[0]).is_loopback and
+                self.headers.get("Host","").lower() in self.server.primary_hosts and
+                "X-Forwarded-Host" not in self.headers)
 
     def do_GET(self):
         if not self.valid_host():
@@ -211,7 +231,7 @@ class Handler(BaseHTTPRequestHandler):
                     return self.reply({"error":"Inicia sesión para continuar."},401)
                 if action in acceso.ACTIONS:
                     links = self.server.network_info["urls"]
-                    origin = links[0] if links else "https://" + self.headers["Host"]
+                    origin = self.server.network_info["public_url"] or (links[0] if links else "https://" + self.headers["Host"])
                     try:
                         result = acceso.act(db,user,action,{**p,"_token":session,"_activation_url":origin+"/#activar"})
                     except acceso.InvalidCode as exc:
@@ -293,12 +313,13 @@ def main():
     parser.add_argument("--port",type=int,default=8765)
     parser.add_argument("--no-browser",action="store_true")
     parser.add_argument("--local",action="store_true",help="Permitir acceso sólo desde la computadora principal")
+    parser.add_argument("--public-url",type=public_origin,help="URL HTTPS pública de Tailscale Funnel para este servidor local")
     parser.add_argument("--vista",choices=("web","escritorio"),help="Abrir en el navegador o en la ventana de Windows")
     args = parser.parse_args()
     edition = ROOT / "edicion.txt"
     vista = args.vista or (edition.read_text(encoding="utf-8-sig").strip() if edition.exists() else "web")
     DATA.mkdir(parents=True,exist_ok=True)
-    addresses = [] if args.local else seguridad_local.enlaces_locales()
+    addresses = [] if args.local or args.public_url else seguridad_local.enlaces_locales()
     launch = not args.no_browser and not os.environ.get("JUNIORS_NO_BROWSER")
     try:
         server = LocalServer(("0.0.0.0" if addresses else "127.0.0.1",args.port),Handler)
@@ -306,6 +327,8 @@ def main():
         url = f"https://127.0.0.1:{args.port}"
         if not instancia_disponible(url):
             raise SystemExit(f"El puerto {args.port} está ocupado. Cierra el otro servicio o usa iniciar.bat --port 8766.")
+        if args.public_url:
+            raise SystemExit("Cierra el servidor de JuniorsControl antes de iniciarlo con --public-url.")
         if launch:
             abrir_vista(vista,url,(DATA / "https" / "pin.txt").read_text(encoding="ascii"))
         return
@@ -315,10 +338,13 @@ def main():
         server.tls = ctx
         server.lan_addresses = addresses
         server.accepted_ips = {"127.0.0.1",*addresses}
-        server.allowed_hosts = {f"{host}:{server.server_port}" for host in (*server.accepted_ips,"localhost")}
+        server.primary_hosts = {f"{host}:{server.server_port}" for host in ("127.0.0.1","localhost")}
+        server.allowed_hosts = server.primary_hosts | {f"{host}:{server.server_port}" for host in addresses}
+        server.public_host = urlsplit(args.public_url).netloc if args.public_url else None
         server.ca_der = (DATA / "https" / "Juniors-CA.cer").read_bytes()
         server.network_info = {
             "urls":[f"https://{ip}:{server.server_port}" for ip in addresses],
+            "public_url":args.public_url,
             "fingerprint":hashlib.sha256(server.ca_der).hexdigest().upper(),
             "cert_url":"/Juniors-CA.cer","local_only":not bool(addresses)
         }

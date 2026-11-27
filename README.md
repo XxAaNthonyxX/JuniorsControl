@@ -13,6 +13,26 @@ La web y la ventana de escritorio usan la misma base Microsoft SQL Server. El se
 
 Deja abierta la consola durante el turno. Ctrl+C detiene el servidor. En otras PC y tabletas, abre el enlace HTTPS de **Dispositivos**. El certificado público y los pasos de conexión están en `CONEXION.txt`. SQL Server solo necesita ser accesible desde la máquina que ejecuta el servidor de JuniorsControl.
 
+### Acceso desde otras redes con un navegador
+
+En la PC principal, activa tu cuenta de administración y configura el remitente en **Equipo y correo**. Para una demostración que puedas compartir por Internet, usa una base con datos de ejemplo y cuentas personales con contraseñas propias. Configura [Tailscale Funnel](https://tailscale.com/docs/features/tailscale-funnel) en esa PC.
+
+1. Cierra el servidor y vuelve a abrirlo indicando el enlace HTTPS del Funnel. Sustituye el nombre de ejemplo por el de tu PC. JuniorsControl escuchará en la interfaz local.
+
+   ```powershell
+   .\iniciar_web.bat --public-url https://equipo.red.ts.net:8443
+   ```
+
+2. En otra terminal de la misma PC, abre el túnel HTTPS. Tailscale emite el certificado que utilizan los navegadores de los invitados. Solo se publica el servicio web de JuniorsControl.
+
+   ```powershell
+   tailscale funnel --https=8443 https+insecure://127.0.0.1:8765
+   ```
+
+3. Copia el enlace desde **Dispositivos**. En **Equipo y correo**, invita a cada persona con su correo y rol. Cada invitado abre el enlace, introduce el código de seis dígitos y crea su contraseña. Desde la PC invitada solo se requiere el navegador.
+
+Para finalizar la demostración, detén Funnel con Ctrl+C. SQL Server permanece en la PC principal.
+
 ## Comprobar un turno
 
 En la carta de ejemplo, registra dos gaseosas para una mesa. En Inventario verás 10 botellas físicas, 2 reservadas y 8 disponibles. Al confirmar el cobro de S/ 10,00, quedan 8 físicas y se libera la reserva. Para devolver una botella, abre la venta cobrada, indica el motivo y marca el insumo si está apto para reincorporarlo. Ventas y Movimientos permiten comprobar el importe y el lote.

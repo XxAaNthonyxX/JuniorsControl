@@ -270,6 +270,7 @@ function renderAuth(){
    renderAuth();
  },"link");
  if(reset)alternate+=" "+button("Solicitar otro código",()=>{authTab="recover";renderAuth()},"link");
+ if(!setup&&!register&&!recovery)alternate+=' <a class="btn link" href="#activar">Activar mi cuenta</a>';
  document.querySelector("#app").innerHTML=`<main class="auth-layout"><section class="auth-photo">${brand()}<div class="auth-sign"><span>COMAS · LIMA</span><b>Pollos y<br>parrillas<span>.</span></b></div></section><section class="auth-main"><div class="auth-box"><div class="eyebrow"><i></i> ${setup?"PRIMER INICIO":"ACCESO DEL PERSONAL"}</div><h1>${title}</h1><p>${intro}</p><form id="auth-form" class="stack">${fields}<p class="err" hidden role="alert"></p><button class="btn primary big">${label} <span>→</span></button></form><div class="auth-alt">${alternate}</div></div></section></main>`;
  document.querySelector("#auth-form").onsubmit=async e=>{
    e.preventDefault();

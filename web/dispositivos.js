@@ -65,6 +65,13 @@
       '<div class="actions">'+button("Copiar enlace",()=>copyAddress(selectedAddress))+'</div></div></div>');
   }
 
+  function publicConnection(address) {
+    return panel("Acceso desde el navegador",'<div class="stack">'+
+      '<p>Comparte este enlace con las personas invitadas en Equipo y correo. Cada persona ingresa con su cuenta de Juniors.</p>'+
+      '<a href="'+h(address)+'" target="_blank" rel="noopener">'+h(address)+'</a></div>',
+      button("Copiar enlace remoto",()=>copyAddress(address)));
+  }
+
   function trust(network) {
     const fp = String(network.fingerprint || "").replace(/[\s:]/g,"").toLowerCase();
     const valid = /^[a-f0-9]{64}$/.test(fp);
@@ -86,6 +93,7 @@
 
   pages.dispositivos = () => {
     if (S.user?.role !== "admin" || !S.network) return "";
+    if (S.network.public_url) return publicConnection(S.network.public_url);
     const guides = instructions.map(([title,text])=>'<details><summary style="cursor:pointer"><strong>'+h(title)+
       '</strong></summary><p style="margin:8px 0 0">'+h(text)+'</p></details>').join("");
     return '<div class="stack">'+connection(S.network)+trust(S.network)+

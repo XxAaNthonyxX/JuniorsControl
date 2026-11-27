@@ -27,7 +27,7 @@ class Cursor:
 
 class Stub:
     def __init__(self, order=None, task=None, conflict=None, lines=None, delivered=0, details=None,
-                 dispatched=False, cancellation_pending=False):
+                 cancellation_pending=False):
         self.order=order or {'id':1,'status':'Reservado','paid_at':None,'day':inv.today(),'version':1}
         self.task=task or {'area':'Cocina','status':'En cola'}
         self.task["revision"]=1
@@ -35,7 +35,6 @@ class Stub:
         self.lines=lines or []
         self.delivered=delivered
         self.details=details or []
-        self.dispatched=dispatched
         self.cancellation_pending=cancellation_pending
         self.statements=[]
     def execute(self,sql,args=()):
@@ -44,8 +43,8 @@ class Stub:
         if s.startswith('select * from inv_orders where id='):return Cursor(self.order)
         if 'top(1) number from inv_orders' in s:return Cursor(self.conflict)
         if 'from inv_cancel_requests where order_id' in s:return Cursor({'id':7} if self.cancellation_pending else None)
-        if 'select 1 from inv_details where sent_at is not null' in s:return Cursor((1,) if self.dispatched else None)
-        if s.startswith("select 1 from inv_details where order_id=? and status='entregado'"):return Cursor((1,) if self.delivered else None)
+        if s.startswith("select 1 from inv_details where order_id=? and status='entregado'"):
+            return Cursor((1,) if self.delivered or any(d["status"]=="Entregado" for d in self.details) else None)
         if 'from inv_details where order_id' in s and 'and detail_no' in s:return Cursor(self.task)
         if s.startswith('select * from inv_details where order_id'):return Cursor(rows=self.details)
         if s.startswith('select number,day from inv_orders'):return Cursor({'number':1,'day':inv.today()})
@@ -106,7 +105,8 @@ class TestAtencionV4(unittest.TestCase):
         self.assertFalse(any('reserved=reserved-' in q.lower() for q,_ in db.statements))
     def test_request_cancel_requires_delivery(self):
         with self.assertRaisesRegex(ValueError,"requiere un producto entregado"):
-            inv._ask_cancel(Stub(dispatched=True),WAITER,dict(id=1,version=1,reason="Retirar detalle"))
+            db=Stub(details=[dict(sent_at="2026-11-27",status="En cola")])
+            inv._ask_cancel(db,WAITER,dict(id=1,version=1,reason="Retirar detalle"))
     def test_send_to_preparation_uses_area_from_catalog(self):
         db=Stub(lines=[{'product_id':6,'qty':1,'detail_no':1,'sent_product':None,'sent_qty':None,
                        'prep_area':'Barra','remove_pending':False}])
@@ -127,6 +127,34 @@ class TestAtencionV4(unittest.TestCase):
         self.assertEqual(reserve.call_args.args[2],{5:1,6:1})
         self.assertTrue(any("SET remove_pending=1" in sql and args==(1,1) for sql,args in db.statements))
         self.assertTrue(any("SET status='Cancelado'" in sql and args==(1,2) for sql,args in db.statements))
+        self.assertFalse(any("SET sent_product=product_id" in sql for sql,_ in db.statements))
+
+    def test_confirming_changes_replaces_the_sent_snapshot_and_reallocates_stock(self):
+        sent=dict(detail_no=1,product_id=6,qty=1,sent_at="2026-11-27",sent_product=6,sent_qty=1,
+                  status="Preparando",remove_pending=False,prep_area="Barra")
+        removed=dict(sent,detail_no=2,product_id=3,sent_product=3,remove_pending=True)
+        delivered=dict(sent,detail_no=3,product_id=4,sent_product=4,status="Entregado")
+        changed=dict(sent,product_id=5,qty=2,prep_area="Cocina")
+        lines=[dict(detail_no=1,product_id=5,qty=2),dict(detail_no=3,product_id=4,qty=1)]
+        order=dict(id=1,day=inv.today(),status="Reservado",version=1,take_away=False)
+        db=Stub(order=order,details=[sent,removed,delivered],lines=[changed,delivered])
+        payload=dict(id=1,version=1,table_number=1,lines=lines,confirm_changes=True)
+        with patch.object(inv,"_reserve_lines") as reserve:
+            result=inv._save_order(db,WAITER,payload)
+        self.assertFalse(result["cerrada"])
+        self.assertEqual(reserve.call_args.args[2],{5:2,4:1})
+        self.assertTrue(any("SET status='Cancelado'" in sql and args==(1,2) for sql,args in db.statements))
+        self.assertEqual([(args[0],args[2],args[3]) for sql,args in db.statements if "SET sent_product=product_id" in sql],
+                         [("Cocina",1,1)])
+
+    def test_confirming_an_edit_cannot_change_a_delivered_detail(self):
+        details=[dict(detail_no=1,product_id=6,qty=1,sent_at="2026-11-27",status="Entregado",remove_pending=False)]
+        order=dict(id=1,day=inv.today(),status="Reservado",version=1,take_away=False)
+        db=Stub(order=order,details=details)
+        payload=dict(id=1,version=1,table_number=1,lines=[dict(detail_no=1,product_id=6,qty=2)],confirm_changes=True)
+        with self.assertRaisesRegex(ValueError,"entregado no se puede modificar"):
+            inv._save_order(db,WAITER,payload)
+        self.assertFalse(any(sql.startswith("UPDATE") for sql,_ in db.statements))
 
     def test_confirming_retirement_reduces_reservations_for_the_same_product(self):
         job=dict(product_id=6,qty=1,sent_product=6,sent_qty=1)
@@ -155,16 +183,19 @@ class TestAtencionV4(unittest.TestCase):
         with self.assertRaisesRegex(ValueError,"entregado no se puede eliminar"):
             inv._validate_details([dict(detail_no=2,product_id=5,qty=1)],{1:delivered})
 
-    def test_cancel_unsent_releases_reservation_and_table_without_request(self):
-        db=Stub()
-        with patch.object(inv,"_release") as release:
-            inv._cancel(db,WAITER,dict(id=1,version=1))
-        release.assert_called_once_with(db,1)
-        self.assertTrue(any("UPDATE inv_orders SET status='Cancelado'" in sql for sql,_ in db.statements))
-        self.assertFalse(any("INSERT INTO inv_cancel_requests" in sql for sql,_ in db.statements))
+    def test_cancel_before_delivery_releases_reservations_and_retires_sent_details(self):
+        for dispatched in (False,True):
+            with self.subTest(dispatched=dispatched),patch.object(inv,"_release") as release:
+                details=[dict(sent_at="2026-11-27",status="Preparando")] if dispatched else [dict(sent_at=None,status=None)]
+                db=Stub(details=details)
+                inv._cancel(db,WAITER,dict(id=1,version=1))
+                release.assert_called_once_with(db,1)
+                self.assertTrue(any("UPDATE inv_details SET status='Cancelado'" in sql for sql,_ in db.statements))
+                self.assertTrue(any("UPDATE inv_orders SET status='Cancelado'" in sql for sql,_ in db.statements))
+                self.assertFalse(any("INSERT INTO inv_cancel_requests" in sql for sql,_ in db.statements))
 
-    def test_cancel_sent_or_pending_approval_does_not_release_reservations(self):
-        for db,error in ((Stub(dispatched=True),"ya se envió"),(Stub(cancellation_pending=True),"debe aprobarse")):
+    def test_cancel_delivered_or_pending_approval_does_not_release_reservations(self):
+        for db,error in ((Stub(delivered=1),"productos entregados"),(Stub(cancellation_pending=True),"debe aprobarse")):
             with self.subTest(error=error),patch.object(inv,"_release") as release:
                 with self.assertRaisesRegex(ValueError,error):
                     inv._cancel(db,WAITER,dict(id=1,version=1))

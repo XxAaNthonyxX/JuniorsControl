@@ -535,8 +535,8 @@ def _pending_cancel(db, order_id):
     return db.execute("SELECT id,revision FROM inv_cancel_requests WHERE order_id=? AND status='Pendiente'",(order_id,)).fetchone()
 
 
-def _dispatch_exists(db, order_id):
-    return db.execute("SELECT 1 FROM inv_details WHERE sent_at IS NOT NULL AND order_id=?",(order_id,)).fetchone() is not None
+def _has_delivered_details(db, order_id):
+    return db.execute("SELECT 1 FROM inv_details WHERE order_id=? AND status='Entregado'",(order_id,)).fetchone() is not None
 
 
 def _get_order(db,p):
@@ -626,6 +626,9 @@ def _reserve_lines(db,order,requested,old_lines,status):
 
 def _save_order(db,user,p,*,exchange=False):
     _role(user,"atencion","caja","admin")
+    confirm_changes=p.get("confirm_changes") is True
+    if confirm_changes and (exchange or not p.get("id")):
+        raise ValueError("Registra la comanda antes de enviarla a preparación.")
     number_table = None if exchange else _table_number(p.get("table_number", p.get("table_name")))
     table = _text(p.get("table_name"), "mesa o referencia", 60) if exchange else f"Mesa {number_table}"
     rows = p.get("lines")
@@ -641,6 +644,7 @@ def _save_order(db,user,p,*,exchange=False):
             line["detail_no"]=_id(line["detail_no"])
         requested[product_id]=requested.get(product_id,0)+line["qty"]
     old_lines = {}
+    closed = False
     if not exchange:
         day_check=_get_order(db,p)["day"] if p.get("id") else business_day(db)
         conflict=db.execute("""SELECT TOP(1) number FROM inv_orders
@@ -671,20 +675,23 @@ def _save_order(db,user,p,*,exchange=False):
         if take_away!=o["take_away"] and active and all(d["status"]=="Entregado" for d in active):
             raise ValueError("El pedido ya fue entregado. La modalidad de consumo está bloqueada.")
         removed=_validate_details(rows,details)
-        if not rows and not _dispatch_exists(db,order):
+        was_sent=any(detail["sent_at"] for detail in details.values())
+        if confirm_changes and not was_sent:
+            raise ValueError("Envía la comanda a preparación después de guardar los cambios.")
+        if not rows and not was_sent:
             raise ValueError("Usa Anular comanda para cerrar un pedido que aún no se envió.")
-        requested=_reserved_quantities(rows,details,removed)
+        if not confirm_changes:
+            requested=_reserved_quantities(rows,details,removed)
         for detail in removed:
             number=detail["detail_no"]
-            if detail["remove_pending"]:
-                continue
-            if detail["sent_at"]:
+            if confirm_changes or not detail["sent_at"]:
+                _retire_detail(db,order,number)
+            elif not detail["remove_pending"]:
                 db.execute("""UPDATE inv_details SET remove_pending=1,product_id=sent_product,qty=sent_qty
                               WHERE order_id=? AND detail_no=?""",(order,number))
-            else:
-                _retire_detail(db,order,number)
+        closed=not requested
         db.execute("UPDATE inv_orders SET table_name=?,table_number=?,take_away=?,status=?,version=version+1 WHERE id=?",
-                   (table,number_table,take_away,"Reservado" if requested else "Cancelado",order))
+                   (table,number_table,take_away,"Cancelado" if closed else "Reservado",order))
     else:
         timestamp=now()
         day=business_day(db)
@@ -704,9 +711,13 @@ def _save_order(db,user,p,*,exchange=False):
             db.execute("UPDATE inv_details SET product_id=?,qty=? WHERE order_id=? AND detail_no=?",args)
         else:
             db.execute("INSERT INTO inv_details(product_id,qty,order_id,detail_no) VALUES(?,?,?,?)",args)
-    _event(db,user,order,"Modificado" if old_lines else "Reservado")
+    if confirm_changes:
+        if not closed:
+            _dispatch_details(db,user,order,_pending_dispatch(_preparation_details(db,order)))
+        _record_retired_details(db,user,order,[d for d in removed if d["sent_at"]])
+    _event(db,user,order,"Cancelado" if closed else "Modificado" if old_lines else "Reservado")
     saved=db.execute("SELECT number,day FROM inv_orders WHERE id=?",(order,)).fetchone()
-    return {"id":order,"code":public("C",saved["number"]),"day":saved["day"]}
+    return {"id":order,"code":public("C",saved["number"]),"day":saved["day"],"cerrada":closed}
 
 
 def _close_details(db,order):
@@ -826,8 +837,8 @@ def _cancel(db,user,p):
     if o["status"] not in ("Por revisar","Reservado"):
         raise ValueError("Para corregir una venta cobrada, registra una devolución.")
     _check_version(o,p)
-    if _dispatch_exists(db,o["id"]):
-        raise ValueError("La comanda ya se envió a preparación. Gestiona la anulación por el flujo correspondiente.")
+    if _has_delivered_details(db,o["id"]):
+        raise ValueError("La comanda tiene productos entregados. Solicita la anulación para que Caja la revise.")
     _release(db,o["id"])
     db.execute("""UPDATE inv_details SET status='Cancelado',remove_pending=0,revision=revision+1
                   WHERE order_id=? AND ISNULL(status,'')<>'Cancelado'""",(o["id"],))
@@ -1012,17 +1023,42 @@ def _exchange(db,user,p):
 
 
 
+def _preparation_details(db,order):
+    return [dict(r) for r in db.execute("""SELECT d.*,p.prep_area FROM inv_details d JOIN inv_products p
+                   ON p.id=d.product_id WHERE d.order_id=? AND ISNULL(d.status,'')<>'Cancelado'""",(order,))]
+
+
+def _pending_dispatch(details):
+    return [d for d in details if d.get("status")!="Entregado" and not d["remove_pending"]
+            and (d["product_id"],d["qty"])!=(d["sent_product"],d["sent_qty"])]
+
+
+def _dispatch_details(db,user,order,details):
+    if not details:
+        return
+    at=now()
+    for d in details:
+        db.execute("""UPDATE inv_details SET sent_product=product_id,sent_qty=qty,area=?,status='En cola',
+                   sent_at=?,started_at=NULL,ready_at=NULL,revision=revision+1 WHERE order_id=? AND detail_no=?""",
+                   (_prep_area(d["prep_area"]),at,order,d["detail_no"]))
+    _event(db,user,order,"Enviado a preparación",f"{len(details)} productos")
+
+
+def _record_retired_details(db,user,order,details):
+    if details:
+        _event(db,user,order,"Retirado de preparación",f"{len(details)} detalles")
+
+
 def _send_to_areas(db,user,p):
     _role(user,"admin","caja","atencion")
     o=_get_order(db,p)
     _check_version(o,p)
     if o["status"] != "Reservado" or _pending_cancel(db,o["id"]):
         raise ValueError("La comanda debe estar abierta, sin solicitud de cancelación.")
-    details=[dict(r) for r in db.execute("""SELECT d.*,p.prep_area FROM inv_details d JOIN inv_products p
-                   ON p.id=d.product_id WHERE d.order_id=? AND ISNULL(d.status,'')<>'Cancelado'""",(o["id"],))]
+    details=_preparation_details(db,o["id"])
     removed=[d for d in details if d["remove_pending"]]
     active=[d for d in details if not d["remove_pending"]]
-    lines=[d for d in active if (d["product_id"],d["qty"])!=(d["sent_product"],d["sent_qty"])]
+    lines=_pending_dispatch(active)
     if not lines and not removed:
         raise ValueError("No hay detalles pendientes de envío.")
     totals=defaultdict(int)
@@ -1032,17 +1068,10 @@ def _send_to_areas(db,user,p):
         _retire_detail(db,o["id"],detail["detail_no"])
     old={l["product_id"]:l for l in db.execute("SELECT * FROM inv_lines WHERE order_id=?",(o["id"],))}
     _reserve_lines(db,o["id"],totals,old,o["status"])
-    at=now()
-    for d in lines:
-        db.execute("""UPDATE inv_details SET sent_product=product_id,sent_qty=qty,area=?,status='En cola',
-                   sent_at=?,started_at=NULL,ready_at=NULL,revision=revision+1 WHERE order_id=? AND detail_no=?""",
-                   (_prep_area(d["prep_area"]),at,o["id"],d["detail_no"]))
+    _dispatch_details(db,user,o["id"],lines)
     db.execute("UPDATE inv_orders SET status=?,version=version+1 WHERE id=?",
                ("Reservado" if active else "Cancelado",o["id"]))
-    if lines:
-        _event(db,user,o["id"],"Enviado a preparación",f"{len(lines)} productos")
-    if removed:
-        _event(db,user,o["id"],"Retirado de preparación",f"{len(removed)} detalles")
+    _record_retired_details(db,user,o["id"],removed)
     return {"id":o["id"],"enviados":len(lines),"retirados":len(removed),"cerrada":not active}
 
 
@@ -1092,8 +1121,8 @@ def _ask_cancel(db,user,p):
         raise ValueError("La comanda ya está cerrada; utiliza devoluciones para ventas cobradas.")
     if _pending_cancel(db,o["id"]):
         raise ValueError("Ya existe una solicitud de cancelación pendiente.")
-    if not db.execute("SELECT 1 FROM inv_details WHERE order_id=? AND status='Entregado'",(o["id"],)).fetchone():
-        raise ValueError("La solicitud requiere un producto entregado. Anula la comanda antes del envío o retira sus detalles desde Atención.")
+    if not _has_delivered_details(db,o["id"]):
+        raise ValueError("La solicitud requiere un producto entregado. Anula la comanda directamente desde Comandas.")
     reason=_text(p.get("reason"),"motivo",500)
     cid=db.execute("""INSERT INTO inv_cancel_requests(order_id,status,reason,requester,requested_at,requester_id,request_day)
                        OUTPUT INSERTED.id VALUES(?,'Pendiente',?,?,?,?,?)""",(o["id"],reason,user["name"],now(),user["id"],business_day(db))).lastrowid

@@ -11,6 +11,7 @@ function productBy(id){return S.products.find(p=>p.id===id)}
 function originalLine(p){return ticket.id?S.orders.find(o=>o.id===ticket.id)?.lines.find(l=>l.product_id===p.id):null}
 function priceFor(p){return originalLine(p)?.price??p.price}
 function sumTicket(){return ticket.lines.reduce((sum,l)=>sum+l.price*l.qty,0)}
+function wasSentToPreparation(o){return o.details.some(d=>d.sent_at)}
 function replacementSlot(){
  return ticket.lines.find(l=>!l.product_id)||ticket.lines.find(l=>l.detail_no===ticket.replaceNumber);
 }
@@ -38,14 +39,6 @@ function stockForMenu(replaced){
    for(const ingredient of recipes.get(line.product_id)||[]){
      const id=ingredient.item_id;
      balances.set(id,balances.get(id)-Math.round(ingredient.qty*1000)*line.qty);
-   }
- }
- const kept=new Set(ticket.lines.map(l=>l.detail_no));
- for(const detail of order?.details||[]){
-   if(!detail.sent_at||detail.status==="Cancelado"||kept.has(detail.detail_no))continue;
-   for(const ingredient of recipes.get(detail.sent_product)||[]){
-     const id=ingredient.item_id;
-     balances.set(id,balances.get(id)-Math.round(ingredient.qty*1000)*detail.sent_qty);
    }
  }
  return {recipes,balances};
@@ -86,7 +79,6 @@ function removeDetail(line){
  if(line.status==="Entregado")return;
  ticket.lines=ticket.lines.filter(other=>other!==line);
  if(ticket.replaceNumber===line.detail_no)ticket.replaceNumber=null;
- if(line.sent_at)ticket.pendingRemoval=true;
  drawPOS();
 }
 function detailCard(l){
@@ -94,7 +86,7 @@ function detailCard(l){
  const remove=delivered?"":button("Eliminar detalle",()=>removeDetail(l),"link");
  if(!l.product_id)return `<div class="ticket-item"><strong>Detalle ${l.detail_no}</strong><p>Selecciona un producto de la carta.</p>${remove}</div>`;
  const unsent=l.product_id!==l.sent_product||l.qty!==l.sent_qty;
- const state=delivered?"Entregado":unsent?"Pendiente de envío":l.status;
+ const state=delivered?"Entregado":unsent?(ticket.confirmChanges?"Pendiente de confirmar":"Pendiente de envío"):l.status;
  const controls=delivered?"":`<div class="actions"><div class="stepper"><button aria-label="Quitar una unidad" ${bind(()=>changeDetailQty(l,-1))}>−</button><b>${l.qty}</b><button aria-label="Añadir una unidad" ${bind(()=>changeDetailQty(l,1))}>+</button></div>
  ${button(ticket.replaceNumber===l.detail_no?"Selecciona el reemplazo en la carta":"Cambiar producto",()=>{ticket.replaceNumber=l.detail_no;drawPOS();jumpTo(".catalog")},"link")}${remove}</div>`;
  return `<div class="ticket-item"><strong>Detalle ${l.detail_no} · ${h(l.name)}</strong><small class="sub">${l.qty} × ${cash(l.price)} · ${h(state)}</small><div class="ticket-item-bottom">${controls}<b style="white-space:nowrap">${cash(l.qty*l.price)}</b></div></div>`;
@@ -133,21 +125,22 @@ function ticketPanel(){
  const activeDetails=(savedOrder?.details||[]).filter(d=>d.status!=="Cancelado");
  const modeLocked=activeDetails.length>0&&activeDetails.every(d=>d.status==="Entregado");
  const n=ticket.lines.reduce((a,l)=>a+l.qty,0);
- const canSaveEmpty=!!savedOrder?.details.some(d=>d.sent_at);
  const preview=ticket.id?null:S.next_order_code;
  const code=ticket.id?ticket.code:preview;
- const removalNotice=ticket.pendingRemoval?'<p class="notice">Guarda los cambios y usa Enviar a preparación para retirar el detalle de la cola del área.</p>':"";
- const emptyNotice=ticket.id&&!ticket.lines.length?(canSaveEmpty?
-   '<p class="muted">Al retirar el último detalle, la comanda se cerrará y liberará la mesa.</p>':
-   `<p class="muted">Agrega otro producto o anula la comanda.</p>${savedOrder&&canCancelUnsent(savedOrder)?
-     button("Anular comanda",()=>cancelUnsent(savedOrder),"danger"):""}`):"";
+ const confirmationNotice=ticket.confirmChanges?(ticket.lines.length?
+   '<p class="notice">Preparación verá los cambios cuando pulses Confirmar cambios.</p>':
+   '<p class="notice">Al confirmar, se retirarán los detalles de preparación y se liberará la mesa.</p>'):"";
+ const canSave=(n||ticket.confirmChanges)&&ticket.lines.every(l=>l.product_id);
+ const submitLabel=ticket.confirmChanges?"Confirmar cambios":ticket.id?"Guardar cambios":"Registrar comanda";
  return `<section class="ticket" tabindex="-1" aria-label="Pedido actual"><header><div class="ticket-icon">${icon("receipt")}</div><div><div class="eyebrow">${ticket.id?"EDITAR COMANDA":"NUEVA COMANDA"}</div><h2>${code?h(code):"Pedido actual"}</h2>${preview?'<p class="sub">Número provisional hasta registrar</p>':""}</div>${button("Volver a la carta",()=>jumpTo(".catalog"),"link catalog-jump")}</header><div class="ticket-ref"><label class="field"><span>Modalidad de consumo</span><select name="take_away" ${modeLocked?"disabled":""}><option value="0" ${!ticket.take_away?"selected":""}>En el local</option><option value="1" ${ticket.take_away?"selected":""}>Para llevar</option></select></label>${modeLocked?'<small class="muted">Pedido entregado · modalidad bloqueada</small>':""}<div class="grid2">
  ${select("piso","Piso",[[1,"Piso 1 · Mesas 1 a 10"],[2,"Piso 2 · Mesas 11 a 20"]],ticket.floor||1)}
  <label class="field"><span>Número de mesa</span><select id="mesa" name="table_number" required><option value="">Selecciona mesa</option>${Array.from({length:10},(_,i)=>(ticket.floor===2?11:1)+i).map(n=>{
  const occupied=(S.orders||[]).some(o=>o.day===(ticket.day||S.today)&&["Reservado","Por revisar"].includes(o.status)&&o.id!==ticket.id&&(Number(o.table_number)===n||(!o.table_number&&["Mesa "+n,String(n)].includes(o.table_name))));
  return `<option value="${n}" ${Number(ticket.table_number)===n?"selected":""} ${occupied?"disabled":""}>Mesa ${n}${occupied?" · OCUPADA":" · Disponible"}</option>`}).join("")}</select></label></div>
  <p class="muted" style="font-size:12px">Una mesa puede tener una sola comanda activa por fecha. La cancelación solicitada NO libera la mesa.</p></div>
- <div class="ticket-items">${ticket.lines.length?ticket.lines.map(detailCard).join(""):`<div class="ticket-empty"><span>${icon("plate")}</span><b>Comanda vacía</b><p>Agrega un producto de la carta para comenzar.</p></div>`}${removalNotice}${emptyNotice}</div><div class="ticket-bottom"><div class="line"><span>Productos</span><b>${n}</b></div><div class="total"><strong>Total</strong><strong>${cash(sumTicket())}</strong></div><button class="btn primary big" ${(n||canSaveEmpty)&&ticket.lines.every(l=>l.product_id)?bind(saveTicket):"disabled"}>${icon("receipt")}${ticket.id?"Guardar cambios":"Registrar comanda"}</button>${ticket.id||n?button(ticket.id?"Salir de la edición":"Vaciar comanda",()=>modal("Descartar borrador","<p>Se descartarán los cambios de esta comanda que aún no guardaste.</p>",async()=>{resetTicket();render()},"Descartar"),"link clear-ticket"):""}</div></section>`;
+ <div class="ticket-items">${ticket.lines.length?ticket.lines.map(detailCard).join(""):`<div class="ticket-empty"><span>${icon("plate")}</span><b>Comanda vacía</b><p>Agrega un producto de la carta para comenzar.</p></div>`}${confirmationNotice}</div><div class="ticket-bottom"><div class="line"><span>Productos</span><b>${n}</b></div><div class="total"><strong>Total</strong><strong>${cash(sumTicket())}</strong></div><button class="btn primary big" ${canSave?bind(saveTicket):"disabled"}>${icon("receipt")}${submitLabel}</button>
+ ${savedOrder&&canCancelOrder(savedOrder)?button("Anular comanda",()=>cancelOrder(savedOrder),"danger clear-ticket"):""}
+ ${ticket.id||n?button(ticket.id?"Salir de la edición":"Vaciar comanda",()=>modal("Descartar borrador","<p>Se descartarán los cambios de esta comanda que aún no confirmaste.</p>",async()=>{resetTicket();render()},"Descartar"),"link clear-ticket"):""}</div></section>`;
 }
 function posBody(){
  const categories=new Set(S.menu_categories??S.products.map(product=>product.category));
@@ -160,16 +153,23 @@ function posBody(){
 function attentionPage(){
  const open=S.orders.filter(o=>o.day===S.today&&["Reservado","Por revisar"].includes(o.status)&&!o.cancel_request);
  const rows=open.map(o=>[h(o.code),h(o.table_name),h(displayOrderStatus(o))+" · "+(o.take_away?"Para llevar":"En el local"),
-   button("Editar",()=>editOrder(o),"secondary")+(o.details.some(d=>d.pending)?button("Enviar a preparación",()=>sendToPreparation(o),"primary"):"")]);
+   button("Editar",()=>editOrder(o),"secondary")+(ticket.id!==o.id&&o.status==="Reservado"&&o.details.some(d=>d.pending)?
+     button(wasSentToPreparation(o)?"Confirmar cambios":"Enviar a preparación",()=>sendToPreparation(o),"primary"):"")]);
  return posBody()+(rows.length?panel("Comandas en atención",table(["Comanda","Mesa","Estado","Acciones"],rows)):"");
 }
 function drawPOS(){if(route==="atencion"){document.querySelector("#view").innerHTML=attentionPage();prune()}}
 pages.atencion=attentionPage;
 async function saveTicket(){if(!ticket.table_number){document.querySelector("#mesa")?.focus();toast("Selecciona primero un piso y una mesa disponible.",true);return}
  const payload={take_away:ticket.take_away,expected_day:ticket.day||S.today,table_number:ticket.table_number,lines:ticket.lines.map(({detail_no,product_id,qty})=>({detail_no,product_id,qty}))};
- if(ticket.id)Object.assign(payload,{id:ticket.id,version:ticket.version});
+ if(ticket.id)Object.assign(payload,{id:ticket.id,version:ticket.version,confirm_changes:ticket.confirmChanges});
  const b=document.querySelector(".ticket-bottom .primary");if(b)b.disabled=true;
- try{const result=await api("pedidos.save",payload);const edited=ticket.id;const removal=ticket.pendingRemoval;resetTicket();await reload();orderFilter="Abiertas";orderDay=null;orderQuery="";go("atencion");toast(`${result.code} ${edited?"actualizada":"registrada"}.${removal?" Envía los cambios a preparación para confirmar el retiro.":""}`)}finally{if(b)b.disabled=false}
+ try{
+   const result=await api("pedidos.save",payload);
+   resetTicket();await reload();go("atencion");
+   if(result.cerrada)toast(`${result.code} cerrada. Mesa e insumos liberados.`);
+   else if(payload.confirm_changes)toast(`${result.code} actualizada en preparación.`);
+   else toast(`${result.code} ${payload.id?"actualizada":"registrada"}.`);
+ }finally{if(b)b.disabled=false}
 }
 function editOrder(o){
  const change=()=>{
@@ -177,11 +177,11 @@ function editOrder(o){
      table_number:o.table_number||Number(String(o.table_name).replace(/^Mesa /i,"")),
      floor:o.floor||(Number(o.table_number||String(o.table_name).replace(/^Mesa /i,""))>10?2:1),
      nextDetailNo:Math.max(0,...o.details.map(l=>l.detail_no))+1,
-     pendingRemoval:o.details.some(l=>l.remove_pending),
+     confirmChanges:wasSentToPreparation(o),
      lines:o.details.filter(l=>l.status!=="Cancelado"&&!l.remove_pending).map(l=>({...l}))};
    menuQuery="";menuCategory="Todos";go("atencion");
  };
- if(ticket.lines.length&&ticket.id!==o.id){modal("Cambiar de comanda","<p>Se descartarán los cambios del borrador abierto en atención.</p>",async()=>change(),"Continuar")}else{change()}
+ if((ticket.id||ticket.lines.length)&&ticket.id!==o.id){modal("Cambiar de comanda","<p>Se descartarán los cambios del borrador abierto en atención.</p>",async()=>change(),"Continuar")}else{change()}
 }
 function formatPayments(payments, fallback=""){
  return payments?.length?payments.map(p=>`${p.method} ${cash(p.cents/100)}`).join(" · "):fallback;
@@ -317,22 +317,24 @@ function refund(o,l,exchange=false){
 }
 function sendToPreparation(o){
  const pending=o.details.filter(l=>l.pending);
+ const label=wasSentToPreparation(o)?"Confirmar cambios":"Enviar al área de preparación";
  const rows=pending.map(l=>[
    h("Detalle "+l.detail_no+" · "+l.name),
    h(l.remove_pending?l.area:productBy(l.product_id)?.prep_area||"Cocina"),h(l.qty),
    l.remove_pending?"Retirar":"Enviar",
  ]);
- modal("Enviar cambios · "+o.code,`<p>Los cambios se aplicarán a la cola de cada área al confirmar.</p>${table(["Producto","Área","Cantidad","Acción"],rows)}`,
+ modal(label+" · "+o.code,`<p>Los cambios se aplicarán a la cola de cada área al confirmar.</p>${table(["Producto","Área","Cantidad","Acción"],rows)}`,
    async()=>{
      const result=await run("pedidos.send",{id:o.id,version:o.version},"");
      toast(result.cerrada?"Comanda cerrada. Mesa e insumos liberados.":"Cola de preparación actualizada.");
-   },"Confirmar envío");
+   },wasSentToPreparation(o)?"Confirmar cambios":"Confirmar envío");
 }
-function canCancelUnsent(o){
- return !o.cancel_request&&["Reservado","Por revisar"].includes(o.status)&&!o.details.some(d=>d.sent_at);
+function canCancelOrder(o){
+ return !o.cancel_request&&["Reservado","Por revisar"].includes(o.status)&&!o.details.some(d=>d.status==="Entregado");
 }
-function cancelUnsent(o){
- modal("Anular comanda · "+o.code,`<p>Se anulará la comanda de ${h(o.table_name)} y se liberarán la mesa y sus insumos reservados.</p>`,
+function cancelOrder(o){
+ const withdrawal=wasSentToPreparation(o)?" Los detalles se retirarán de la cola de preparación.":"";
+ modal("Anular comanda · "+o.code,`<p>Se anulará la comanda de ${h(o.table_name)} y se liberarán la mesa y sus insumos reservados.${withdrawal}</p>`,
    async()=>{await run("pedidos.cancel",{id:o.id,version:o.version},"Comanda anulada. Mesa e insumos liberados.");if(ticket.id===o.id){resetTicket();render()}},"Anular comanda");
 }
 function requestCancel(o){
@@ -353,7 +355,7 @@ function decideCancel(o){
 function displayOrderStatus(o){
  if(o.cancel_request)return "Cancelación solicitada";
  if(o.status!=="Reservado")return o.status;
- if(!o.lines.length||o.details.some(l=>l.pending))return "Pendiente de envío";
+ if(!o.lines.length||o.details.some(l=>l.pending))return wasSentToPreparation(o)?"Cambios por confirmar":"Pendiente de envío";
  if(o.details.filter(l=>l.status!=="Cancelado").every(l=>l.status==="Entregado"))return "Entregada · por cobrar";
  return "En preparación";
 }
@@ -379,12 +381,12 @@ function orderTable(){
  let acts=button("Ver detalle de comanda",()=>details(o),"secondary");
  if(["admin","caja","atencion"].includes(S.user.role)&&["Reservado","Por revisar"].includes(o.status)){
    if(o.cancel_request)acts+='<small class="muted">Envío bloqueado por solicitud de cancelación.</small>';
-   else if(o.status==="Por revisar")acts+='<small class="muted">Revisa y guarda la comanda desde Atención antes de enviarla.</small>';
    else {
      acts+=button("Editar comanda",()=>editOrder(o),"secondary");
-     if(o.details.some(d=>d.pending))acts+=button("Enviar al área de preparación",()=>sendToPreparation(o),"primary");
+     if(o.status==="Reservado"&&o.details.some(d=>d.pending))acts+=button(
+       wasSentToPreparation(o)?"Confirmar cambios":"Enviar al área de preparación",()=>sendToPreparation(o),"primary");
    }
-   if(canCancelUnsent(o))acts+=button("Anular comanda",()=>cancelUnsent(o),"danger");
+   if(canCancelOrder(o))acts+=button("Anular comanda",()=>cancelOrder(o),"danger");
  }
  return [`<b class="mono">${orderCode(o)}</b>`,`<strong>${h(o.table_name)}</strong><small class="sub">${o.take_away?"Para llevar":"En el local"}</small><small class="sub">${o.floor?`Piso ${o.floor}`:"Anterior a la actualización"}</small>`,badge(displayOrderStatus(o))+(o.cancel_request?`<small class="sub">${h(o.cancel_request.reason)}</small>`:""),h(o.created),cash(o.total),`<div class="actions">${acts}</div>`]}),"No hay comandas que coincidan con estos filtros.");
 }

@@ -6,6 +6,7 @@ Las cantidades se almacenan en milésimas y los importes en céntimos de sol.
 
 from datetime import date, datetime, timedelta, timezone
 from collections import defaultdict
+from fractions import Fraction
 from math import lcm
 import re
 
@@ -187,6 +188,22 @@ def _resolve(db, user, p):
     return issue["id"]
 
 
+def _save_supplier_whatsapp(db, user, p):
+    _require(user, "admin", "recepcion")
+    incident_id = _int(p.get("id"), "solicitud", 1)
+    phone = re.sub(r"[\s().-]", "", _text(p.get("whatsapp"), "WhatsApp", 40))
+    if re.fullmatch(r"9[0-9]{8}", phone):
+        phone = "51" + phone
+    phone = phone.removeprefix("+").removeprefix("00")
+    if not re.fullmatch(r"[1-9][0-9]{7,14}", phone):
+        raise ValueError("Escribe el número de WhatsApp con su código de país.")
+    supplier = _one(db, """SELECT LOWER(LTRIM(RTRIM(r.supplier))) FROM g_incidents i
+                           JOIN g_receipts r ON r.id=i.receipt_id WHERE i.id=?""", incident_id)[0]
+    if not db.execute("UPDATE g_supplier_contacts SET whatsapp=? WHERE supplier=?", (phone, supplier)).rowcount:
+        db.execute("INSERT INTO g_supplier_contacts(supplier,whatsapp) VALUES(?,?)", (supplier, phone))
+    return incident_id
+
+
 def _reserve_waste(db, waste_id, plan):
     for lot_id, amount, _ in plan:
         db.execute("UPDATE inv_lots SET reserved=reserved+? WHERE id=?", (amount,lot_id))
@@ -236,17 +253,58 @@ def _review_waste(db, user, p):
     reason="Merma: "+waste["reason"]
     ref=f"ME{waste['id']:04d}"
     remaining=waste["qty_m"]-sum(part["amount"] for part in reserved)
+    losses = defaultdict(int)
     if approve and remaining:
-        inv.withdraw(db,user,waste["item_id"],remaining,reason,ref,waste["lot_id"])
+        for lot_id, amount, _ in inv.withdraw(db,user,waste["item_id"],remaining,reason,ref,waste["lot_id"]):
+            losses[lot_id] += amount
     for part in reserved:
         lot_id,amount=part["lot_id"],part["amount"]
         db.execute("UPDATE inv_lots SET reserved=reserved-? WHERE id=?", (amount,lot_id))
         if approve:
             inv._move(db,user,lot_id,-amount,reason,ref)
+            losses[lot_id] += amount
+    cost = _waste_lot_cost(db, losses) if approve else None
+    day = inv.business_day(db) if approve else None
     db.execute("DELETE FROM g_waste_lots WHERE waste_id=?", (waste["id"],))
-    db.execute("UPDATE g_wastes SET status=?,reviewed_at=?,reviewer=? WHERE id=?",
-               ("Aprobada" if approve else "Rechazada",stamp(),user["name"],waste["id"]))
+    db.execute("UPDATE g_wastes SET status=?,reviewed_at=?,reviewer=?,cost_cents=?,expense_day=? WHERE id=?",
+               ("Aprobada" if approve else "Rechazada",stamp(),user["name"],cost,day,waste["id"]))
     return waste["id"]
+
+
+def _waste_lot_cost(db, losses):
+    if not losses:
+        return None
+    value = Fraction(0)
+    for lot_id, amount in losses.items():
+        row = db.execute("""SELECT TOP (1) r.approved_m,r.unit_cents,m.delta AS entered_m
+                            FROM g_receipts r JOIN inv_moves m ON m.lot_id=r.lot_id
+                            WHERE r.lot_id=? AND r.approved_m>0 AND r.unit_cents>0 AND m.delta>0
+                              AND m.reason=N'Recepción aprobada' ORDER BY m.id,r.id""", (lot_id,)).fetchone()
+        if row is None:
+            return None
+        # La recepción puede cotizarse en una unidad distinta de la del lote compartido.
+        value += Fraction(_amount(row["approved_m"], row["unit_cents"]) * amount, row["entered_m"])
+    return int(value + Fraction(1, 2))
+
+
+def register_existing_waste_costs(db):
+    for row in db.execute("SELECT id FROM g_wastes WHERE status=N'Aprobada' AND cost_cents IS NULL"):
+        losses = dict(db.execute("""SELECT lot_id,SUM(-delta) FROM inv_moves
+                                   WHERE ref=? AND delta<0 AND reason LIKE N'Merma: %' GROUP BY lot_id""",
+                                 (inv.public("ME",row["id"]),)))
+        cost = _waste_lot_cost(db, losses)
+        if cost is not None:
+            db.execute("UPDATE g_wastes SET cost_cents=? WHERE id=?", (cost,row["id"]))
+
+
+def _set_waste_cost(db, user, p):
+    _require(user, "admin")
+    waste_id = _int(p.get("id"), "merma", 1)
+    cost = _int(p.get("cost_cents"), "costo de la merma")
+    if not db.execute("""UPDATE g_wastes SET cost_cents=?
+                         WHERE id=? AND status=N'Aprobada' AND cost_cents IS NULL""", (cost,waste_id)).rowcount:
+        raise ValueError("Solo puedes completar el costo pendiente de una merma aprobada.")
+    return waste_id
 
 
 def _lines(db, rows, previous=None):
@@ -659,6 +717,7 @@ def act(db, user, action, payload):
     handlers = {
         "gestion.configure_alerts":_configure_alerts,
         "gestion.receipt":_receipt, "gestion.receive":_receive, "gestion.resolve":_resolve,
+        "gestion.supplier_whatsapp":_save_supplier_whatsapp, "gestion.waste_cost":_set_waste_cost,
         "gestion.waste":_waste, "gestion.review_waste":_review_waste,
         "gestion.purchase":_purchase, "gestion.edit_purchase":_edit_purchase,
         "gestion.decide":_decide, "gestion.reopen":_reopen_purchase, "gestion.dispatch":_dispatch,
@@ -718,12 +777,18 @@ def state(db, user):
         active_day=inv.business_day(db)
         result["registered_days"]=[dict(r) for r in db.execute("""WITH days(day) AS (
             SELECT day FROM cash_days UNION SELECT day FROM inv_orders UNION SELECT day FROM cash_expenses
+            UNION SELECT COALESCE(expense_day,LEFT(reviewed_at,10)) FROM g_wastes WHERE status=N'Aprobada'
             UNION SELECT COALESCE(s.cash_day,LEFT(o.paid_at,10)) FROM inv_sales s JOIN inv_orders o ON o.id=s.order_id
             UNION SELECT COALESCE(cash_day,LEFT(at,10)) FROM inv_returns UNION SELECT cash_day FROM sale_voids UNION SELECT cash_day FROM refund_reversals UNION SELECT CAST(? AS nvarchar(10)))
             SELECT days.day,d.opened_at,d.opened_by FROM days LEFT JOIN cash_days d ON days.day=d.day
             WHERE days.day IS NOT NULL ORDER BY days.day DESC""",(active_day,))]
         result["cash_expenses"]=[dict(r,code=inv.public("BL",r["receipt_no"])) for r in
                                  db.execute("SELECT * FROM cash_expenses ORDER BY day DESC,receipt_no DESC")]
+        result["waste_expenses"]=[_with_code(r,"ME") for r in db.execute("""
+            SELECT w.id,w.lot_id,w.cost_cents,w.reason,w.reviewer,i.name AS item_name,
+                   COALESCE(w.expense_day,LEFT(w.reviewed_at,10)) AS day
+            FROM g_wastes w JOIN inv_items i ON i.id=w.item_id
+            WHERE w.status=N'Aprobada' ORDER BY day DESC,w.id DESC""")]
         result["next_cash_expense_code"]=inv.public("BL",_next_cash_expense_number(db,active_day))
     if receiving:
         for r in db.execute("""SELECT r.id,r.item_id,i.code item_code,i.name item_name,i.unit,i.display_unit,i.display_unit_milli,i.area,i.perishable,r.supplier,r.qty_m,
@@ -745,13 +810,16 @@ def state(db, user):
                 receipt.pop("unit_cents")
             result["receipts"].append(receipt)
         for r in db.execute("""SELECT p.id,p.receipt_id,r.item_id,k.purchase_id,COALESCE(c.purchase_day,LEFT(c.created,10)) purchase_day,
-                i.name item_name,i.unit,i.display_unit,i.display_unit_milli,r.supplier,
+                i.name item_name,i.unit,i.display_unit,i.display_unit_milli,r.supplier,contact.whatsapp,
                 r.qty_m,r.received_m,r.approved_m,r.reason,p.created,r.reviewer AS actor,
                 p.resolution,p.closed,p.closer,p.decision FROM g_incidents p JOIN g_receipts r ON r.id=p.receipt_id
                 JOIN inv_items i ON i.id=r.item_id LEFT JOIN g_lines k ON k.id=r.line_id
                 LEFT JOIN g_purchases c ON c.id=k.purchase_id
+                LEFT JOIN g_supplier_contacts contact ON contact.supplier=LOWER(LTRIM(RTRIM(r.supplier)))
                 ORDER BY CASE WHEN p.closed IS NULL THEN 0 ELSE 1 END,p.id DESC"""):
             issue = _with_code(r,"INC")
+            if user["role"] == "caja":
+                issue.pop("whatsapp",None)
             expected,received,approved = issue.pop("qty_m"),issue.pop("received_m"),issue.pop("approved_m")
             issue["missing"] = None if received is None else inv.num(max(0,expected-received))
             issue["rejected"] = None if received is None else inv.num(received-approved)
@@ -766,6 +834,8 @@ def state(db, user):
             if _accessible(user,r["area"]):
                 waste = _with_code(r,"ME")
                 waste["qty"] = inv.num(waste.pop("qty_m"))
+                waste.pop("cost_cents",None)
+                waste.pop("expense_day",None)
                 result["wastes"].append(waste)
     for r in db.execute("""SELECT a.id,a.kind,a.item_id,i.name item_name,i.area,a.message,a.created,a.closed
             FROM g_alerts a JOIN inv_items i ON i.id=a.item_id ORDER BY CASE WHEN a.closed IS NULL THEN 0 ELSE 1 END,a.id DESC"""):

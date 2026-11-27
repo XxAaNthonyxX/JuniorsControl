@@ -73,15 +73,53 @@
         approve?"maxlength=500":"required maxlength=500")+
       note(approve?"Solo la cantidad aprobada ingresará al stock. Las diferencias quedarán como solicitudes pendientes.":
         "Caja o Administración revisará el motivo de rechazo."),
-      v=>run("gestion.receive",{id:r.id,version:r.version,received:stockQuantityPayload(r.item_name,r.unit,v.received,r,r.qty),
-        approved:stockQuantityPayload(r.item_name,r.unit,approve?v.approved:"0",r,r.qty),expiry:v.expiry,reason:v.reason},
-        approve?"Recepción aprobada · stock actualizado":"Solicitud de rechazo registrada"),verb);
+      async v=>{
+        await run("gestion.receive",{id:r.id,version:r.version,received:stockQuantityPayload(r.item_name,r.unit,v.received,r,r.qty),
+          approved:stockQuantityPayload(r.item_name,r.unit,approve?v.approved:"0",r,r.qty),expiry:v.expiry,reason:v.reason},
+          approve?"Recepción aprobada · stock actualizado":"Solicitud de rechazo registrada");
+        const issue=rows("incidents").find(x=>x.receipt_id===r.id);
+        if(!approve&&issue&&canReceive()) supplierWhatsApp(issue);
+      },verb);
     dialog.querySelector("form").addEventListener("input",event=>{
       const field=event.target;
       if(["received","approved"].includes(field.name)){
         setItemQuantityStep(field,r.item_name,field.name==="received",value,r);
       }
     });
+  }
+
+  function supplierWhatsApp(issue, edit=false) {
+    const reference=[label("RC",issue.receipt_id),issue.purchase_id&&label("OC",issue.purchase_id)].filter(Boolean).join(" · ");
+    const differences=[
+      issue.rejected>0&&`Rechazado: ${qtyText(issue,issue.rejected)}.`,
+      issue.missing>0&&`Faltante: ${qtyText(issue,issue.missing)}.`,
+      issue.rejected==null&&`Cantidad observada: ${qtyText(issue,issue.qty)}.`,
+    ].filter(Boolean);
+    const message=[
+      `Hola, ${issue.supplier}. Somos Juniors Pollos y Parrillas.`,
+      `Registramos una observación en la recepción ${reference}.`,
+      `Insumo: ${issue.item_name}.`,
+      ...differences,
+      `Motivo: ${issue.reason}`,
+      "Por favor, confírmanos cómo podemos coordinar la reposición o el ajuste. Gracias.",
+    ].join("\n");
+    const title="Notificar al proveedor por WhatsApp";
+    const preview=note(issue.supplier+" · "+reference)+
+      `<label class="field full"><span>Mensaje</span><textarea rows="7" readonly>${e(message)}</textarea></label>`;
+    if(issue.whatsapp&&!edit){
+      const url=`https://wa.me/${issue.whatsapp}?text=${encodeURIComponent(message)}`;
+      modal(title,preview+note(`WhatsApp del proveedor +${issue.whatsapp}`)+actions(
+        `<a class="btn primary" href="${e(url)}" target="_blank" rel="noopener noreferrer">Abrir WhatsApp</a>`,
+        button("Cambiar número",()=>supplierWhatsApp(issue,true),"link")),null);
+      return;
+    }
+    modal(title,preview+input("whatsapp","Número de WhatsApp con código de país","tel",
+      issue.whatsapp?`+${issue.whatsapp}`:"",'required maxlength="40" placeholder="+51"'),
+      async v=>{
+        await run("gestion.supplier_whatsapp",{id:issue.id,whatsapp:v.whatsapp},"WhatsApp del proveedor guardado");
+        const updated=rows("incidents").find(x=>x.id===issue.id);
+        if(updated&&canReceive()) supplierWhatsApp(updated);
+      },"Guardar número");
   }
 
   function resolveIncident(x,approve) {
@@ -141,7 +179,9 @@
         sub(when(x.created)+" · "+x.actor),e(x.item_name)+sub(x.supplier),e(qtyText(x,x.qty))+
         (x.missing!=null?sub(qtyText(x,x.missing)+" faltantes · "+qtyText(x,x.rejected)+" rechazados"):""),e(x.reason)+
         (x.resolution?sub(x.resolution)+sub(when(x.closed)+" · "+x.closer):""),
-        actions(badge(x.status),canDecideReceipt()&&!x.closed?button("Admitir",()=>resolveIncident(x,true),"primary"):"",canDecideReceipt()&&!x.closed?button("Denegar",()=>resolveIncident(x,false)):"")
+        actions(badge(x.status),canDecideReceipt()&&!x.closed?button("Admitir",()=>resolveIncident(x,true),"primary"):"",
+          canDecideReceipt()&&!x.closed?button("Denegar",()=>resolveIncident(x,false)):"",
+          canReceive()?button("Notificar por WhatsApp",()=>supplierWhatsApp(x)):"")
       ]),"Aún no se han registrado diferencias de recepción.")));
   };
 

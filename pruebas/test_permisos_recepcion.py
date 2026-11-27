@@ -68,3 +68,24 @@ class TestPermisosRecepcion(TestCase):
         self.assertEqual(state["areas"], inv.INVENTORY_AREAS)
         self.assertEqual(state["items"], items)
         self.assertEqual(state["lots"], lots)
+
+    def test_whatsapp_corresponde_al_proveedor_guardado_en_el_rechazo(self):
+        db = Mock()
+        db.execute.side_effect = [Cursor(row=("proveedor de prueba",)), Cursor(count=0), Cursor()]
+        result = gestion.act(db, RECEPCION, "gestion.supplier_whatsapp", {
+            "id": 17, "whatsapp": "987 654 321", "supplier": "Otro proveedor",
+        })
+        self.assertEqual(result["id"], 17)
+        lookup, update, insert = db.execute.call_args_list
+        self.assertIn("JOIN g_receipts", lookup.args[0])
+        self.assertEqual(lookup.args[1], (17,))
+        self.assertEqual(update.args[1], ("51987654321", "proveedor de prueba"))
+        self.assertEqual(insert.args[1], ("proveedor de prueba", "51987654321"))
+
+    def test_whatsapp_rechaza_numero_invalido_o_cuenta_sin_permiso(self):
+        db = Mock()
+        with self.assertRaises(ValueError):
+            gestion.act(db, RECEPCION, "gestion.supplier_whatsapp", {"id": 17, "whatsapp": "https://wa.me/"})
+        with self.assertRaises(PermissionError):
+            gestion.act(db, dict(RECEPCION, role="area"), "gestion.supplier_whatsapp", {"id": 17, "whatsapp": "987654321"})
+        db.execute.assert_not_called()

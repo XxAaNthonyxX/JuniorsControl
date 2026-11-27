@@ -60,6 +60,8 @@ function ventasPeriodo(orders,start,end){
  const money=cents=>cash(cents/100);
  const resultLabel=value=>value<0?"Pérdida":value>0?"Ganancia":"Resultado";
  const expensesFor=(start,end)=>(S.cash_expenses||[]).filter(e=>e.day>=start&&e.day<=end);
+ const wasteExpensesFor=(start,end)=>(S.waste_expenses||[]).filter(e=>e.day>=start&&e.day<=end);
+ const wasteCost=entries=>entries.reduce((sum,e)=>sum+(e.cost_cents??0),0);
  function cashResult(net,expenses){
    const active=expenses.filter(e=>!e.void_at);
    const personal=active.filter(e=>e.kind==="Personal").reduce((sum,e)=>sum+e.cents,0);
@@ -70,6 +72,7 @@ function ventasPeriodo(orders,start,end){
    await reload();
    const sales=ventasPeriodo(S.orders,start,end);
    const count=cashResult(sales.net,expensesFor(start,end));
+   const losses=wasteExpensesFor(start,end);
    const amounts=[
      ["Ventas cobradas",sales.gross],["Devoluciones",-sales.refunded],["Anulaciones",-sales.voided],
      ["Ventas netas",sales.net],["Gastos de personal",-count.personal],["Gastos de mercado",-count.market],
@@ -77,7 +80,14 @@ function ventasPeriodo(orders,start,end){
    ];
    const period=start===end?displayDate(start):displayDate(start)+" al "+displayDate(end);
    modal("Arqueo de caja",`<p>${h(period)}</p>${table(["Concepto","Importe"],amounts.map(([label,value])=>[h(label),money(value)]))}
-     <div class="total"><strong>${resultLabel(count.result)}</strong><strong>${money(count.result)}</strong></div>`,null);
+     <div class="total"><strong>${resultLabel(count.result)}</strong><strong>${money(count.result)}</strong></div>
+     <p class="muted">Costo registrado de mermas en el período ${money(wasteCost(losses))}. ${losses.filter(e=>e.cost_cents==null).length} sin costo registrado.</p>`,null);
+ }
+ function setWasteCost(expense){
+   modal("Registrar costo de "+expense.code,
+     `<p>${h(expense.item_name)} · ${h(expense.reason)}</p>`+
+     input("amount","Costo total de la merma (S/)","number","",'min="0" step="0.01" required'),
+     v=>run("gestion.waste_cost",{id:expense.id,cost_cents:Math.round(Number(v.amount)*100)},"Costo de merma registrado"));
  }
  function addExpense(){
    modal("Registrar gasto",input("day","Jornada","date",S.today,"readonly required")+
@@ -145,6 +155,12 @@ function ventasPeriodo(orders,start,end){
    const filters=`<form id="ventas-filtro" class="actions filters">${input("desde","Desde","date",from,"required")}${input("hasta","Hasta","date",to,"required")}<button class="btn primary">Consultar</button></form>`;
    const expenses=expensesFor(from,to);
    const count=cashResult(r.net,expenses);
+   const losses=wasteExpensesFor(from,to);
+   const lossRows=losses.map(e=>[
+     h(displayDate(e.day)),h(e.code),h(e.item_name),e.lot_id?h("LT"+String(e.lot_id).padStart(4,"0")):"—",
+     h(e.reason),e.cost_cents==null?"Sin costo registrado":money(e.cost_cents),
+     e.cost_cents==null&&S.user.role==="admin"?button("Registrar costo",()=>setWasteCost(e),"link"):h(e.reviewer),
+   ]);
    const outsidePurchase=(S.cash_expenses||[]).find(e=>e.purchase_id&&!e.void_at&&(e.day<from||e.day>to));
    const purchaseNotice=outsidePurchase?`<div class="notice actions">
      <span>Hay compras registradas el ${h(displayDate(outsidePurchase.day))} fuera del período de caja.</span>
@@ -167,6 +183,8 @@ function ventasPeriodo(orders,start,end){
         table(["Medio de pago","Cobros"],methods.map(([m,v])=>[h(m),money(v)]),"Sin cobros"),
         button("Calcular arqueo",()=>openCashCount(from,to),"primary"))+
       panel("Gastos de caja",purchaseNotice+table(["Fecha","Boleta","Tipo","Referencia","Concepto","Importe","Responsable","Estado"],expenseRows,"Sin gastos en el período seleccionado."),button("Registrar gasto",addExpense,"primary"))+
+      panel("Gastos por merma",`<p class="muted">Costo registrado de inventario perdido ${money(wasteCost(losses))}. Las compras se contabilizan en Gastos de caja.</p>`+
+        table(["Fecha","Reporte","Insumo","Lote","Motivo","Costo","Revisión"],lossRows,"Sin mermas aprobadas en el período seleccionado."))+
       panel("Movimientos de caja",table(["Documento","Fecha de operación","Comanda","Mesa o referencia","Responsable","Importe","Acción"],records,"Sin cobros ni devoluciones en este período."),
             records.length?button("Descargar CSV",()=>downloadReport(r)):"")+
       panel("Ventas por producto",table(["Producto","Unidades cobradas","Devueltas","Importe neto"],products,"Sin productos en el período seleccionado."));

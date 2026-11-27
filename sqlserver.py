@@ -152,6 +152,13 @@ def aplicar_areas_operativas(db):
     db.execute((ROOT/"sql/responsables_area_v24.sql").read_text(encoding="utf8"))
 
 
+def _aplicar_v25(db):
+    from gestion import register_existing_waste_costs
+
+    db.execute((ROOT/"sql/gastos_mermas_whatsapp_v25.sql").read_text(encoding="utf8"))
+    register_existing_waste_costs(db)
+
+
 def preparar(db):
     if db.execute("SELECT DB_ID()").fetchone()[0] <= 4:
         raise ValueError("Elige una base exclusiva de JuniorsControl.")
@@ -228,6 +235,9 @@ def preparar(db):
             aplicar_areas_operativas(db)
             version = 24
         if version == 24:
+            _aplicar_v25(db)
+            version = 25
+        if version == 25:
             return
         if version != 2:
             raise ValueError("Versión de esquema incompatible.")
@@ -260,3 +270,4 @@ def preparar(db):
     _aplicar_v22(db)
     db.execute((ROOT/"sql/pechuga_filetes_v23.sql").read_text(encoding="utf8"))
     aplicar_areas_operativas(db)
+    _aplicar_v25(db)

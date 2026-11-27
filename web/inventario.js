@@ -1,22 +1,23 @@
 /* Existencias y movimientos comparten los controles de formularios de la aplicación. */
 (() => {
-  let tab = 'stock', detail = null, search = '', area = '', category = '';
+  let tab = 'stock', detail = null, selectedItem = '', area = '', category = '';
   let moves = null, historyFilter = {}, owner = null;
   const isAdmin = () => S.user.role === 'admin';
   const itemById = id => S.items.find(item => Number(item.id) === Number(id));
   const asOptions = names => names.map(value => [value, value]);
-  const itemOptions = list => list.map(i => [i.id, `${i.code} · ${i.name} (${i.unit})`]);
-  const itemLabel = i => `<strong>${h(i.name)}</strong><br><small class="muted">${h(i.code)} · ${h(i.category)}</small>`;
+  const itemOptions = list => list.map(i => [i.id, `${i.code} · ${i.name} (${stockMeasure(i.name,i.unit).unit})`]);
   const option = (value, label, selected) => `<option value="${h(String(value))}" ${String(value) === String(selected) ? 'selected' : ''}>${h(label)}</option>`;
   const metric = (value, label) => `<div class="metric"><div class="value">${h(String(value))}</div><span class="muted">${h(label)}</span></div>`;
   const yesNo = [[0,'No'],[1,'Sí']];
+  const stockQuantity=(item,value)=>formatStockQuantity(item.name,item.unit,value);
+  const quantityLabel=(field,label)=>{field.closest('label').querySelector('span').textContent=label;};
 
   function resetForUser() {
     const access = JSON.stringify([S.user.id, S.user.role, S.user.area]);
     if (owner === access) return;
     owner = access;
     tab = 'stock'; detail = null; moves = null; historyFilter = {};
-    search = ''; area = ''; category = '';
+    selectedItem = ''; area = ''; category = '';
   }
   function showTab(next) {
     tab = next; detail = null; refreshPanel();
@@ -28,48 +29,133 @@
       prune();
     }
   }
+  function sharedAreaNotice(item) {
+    const baseId=item.base_id||item.id;
+    const sharesStock=baseId!=null&&S.items.some(other=>other.base_id===baseId);
+    return sharesStock?'<p class="muted">El cambio de área se aplica también a las presentaciones que comparten este stock.</p>':'';
+  }
   function formItem(i = {}) {
-    const lists = `<datalist id="inv-areas">${S.areas.map(v=>option(v,v,'')).join('')}</datalist>
-      <datalist id="inv-categories">${S.categories.map(v=>option(v,v,'')).join('')}</datalist>`;
-    const fields = input('name','Nombre del insumo','text',i.name || '','required maxlength="100"') +
+    const lists = `<datalist id="inv-categories">${S.categories.map(v=>option(v,v,'')).join('')}</datalist>`;
+    const suggested=i.code||S.next_item_code;
+    const rule=S.rules.find(r=>Number(r.source_id)===Number(i.id));
+    const ruleTarget=itemById(rule?.target_id);
+    const targets=itemOptions(S.items.filter(item=>Number(item.id)!==Number(i.id)));
+    const fields = `<div class="field"><span id="item-code-label">Código del insumo</span><output aria-labelledby="item-code-label" class="notice">${h(suggested)}</output></div>` +
+      input('name','Nombre del insumo','text',i.name || '','required maxlength="100"') +
       input('unit','Unidad de medida','text',i.unit || '','required maxlength="20" placeholder="kg, L, und…"') +
-      input('area','Área responsable','text',i.area || '','required maxlength="60" list="inv-areas"') +
+      `<label class="field"><span>Área responsable</span><select name="area" required>
+        ${option('','Seleccionar área',i.area||'')}${S.areas.map(name=>option(name,name,i.area)).join('')}
+      </select></label>` +
+      sharedAreaNotice(i) +
       input('category','Categoría','text',i.category || '','required maxlength="60" list="inv-categories"') +
-      input('min_qty','Cantidad mínima','number',i.min_qty ?? 0,'required min="0" step="0.001"') +
+      input('min_qty','Cantidad mínima','number',stockInputValue(i.name,i.unit,i.min_qty ?? 0),'required min="0"') +
       input('warn_days','Avisar días antes de vencer','number',i.warn_days ?? 3,'required min="0" max="3650" step="1"') +
       select('perishable','¿Requiere vencimiento?',yesNo,i.perishable ?? 1) +
-      select('transformable','¿Se transforma en otro insumo?',yesNo,i.transformable ?? 0) + lists;
-    modal(i.id ? `Editar ${i.code}` : 'Nuevo insumo',fields,
-      values => run('inv.item',{...values,...(i.id ? {id:i.id} : {})},'Insumo guardado'));
+      select('transformable','¿Se transforma en otro insumo?',yesNo,i.transformable ?? 0) +
+      select('target_id','Producto resultante de la transformación',[['','Seleccionar insumo resultante'],...targets],rule?.target_id || '') +
+      input('source_qty','Cantidad de materia prima por preparación','number',stockInputValue(i.name,i.unit,rule?.source_qty ?? 1),'required') +
+      input('target_qty','Cantidad de producto resultante','number',stockInputValue(ruleTarget?.name,ruleTarget?.unit,rule?.target_qty ?? 1),'required') +
+      '<p class="muted">Equivalencia por preparación. Para convertir 1 pollo crudo en 1 pollo cocido, indica 1 y 1.</p>' +
+      select('transform_now','Acción al guardar',[[0,'Guardar equivalencia'],[1,'Guardar y transformar ahora']],0) +
+      '<div id="inv-transform-now" class="stack" hidden>' +
+      input('transform_qty','Número de preparaciones a ejecutar','number',1,'min="1" max="10000" step="1" required') +
+      input('transform_expiry','Vencimiento del producto resultante','date','','') +
+      '<p id="inv-transform-summary" class="notice" aria-live="polite"></p></div>' + lists;
+    const dialog=modal(i.id ? `Editar ${i.code}` : 'Nuevo insumo',fields,
+      async values=>{
+        if(i.id)values.id=i.id;
+        delete values.code;
+        values.min_qty=stockQuantityPayload(values.name,values.unit,values.min_qty);
+        if(values.target_id){
+          values.transformable=1;
+          const target=itemById(values.target_id);
+          values.source_qty=stockQuantityPayload(values.name,values.unit,values.source_qty);
+          values.target_qty=stockQuantityPayload(target.name,target.unit,values.target_qty);
+        }
+        const saved=await run('inv.item',values,'');
+        toast(saved.transformed?'Transformación registrada · materia prima descontada y producto resultante ingresado':'Insumo guardado · '+saved.code);
+      });
+    const form=dialog.querySelector('form');
+    const update=()=>{
+      const values=Object.fromEntries(new FormData(form));
+      const execute=values.transform_now==='1';
+      dialog.querySelector('#inv-transform-now').hidden=!execute;
+      dialog.querySelector('#inv-transform-now').style.display=execute?'grid':'none';
+      form.querySelector('button.primary').textContent=execute?'Guardar y transformar':'Guardar';
+      const target=itemById(values.target_id);
+      const sameTarget=Number(values.target_id)===Number(rule?.target_id);
+      const sourceUnit=stockMeasure(values.name,values.unit).unit;
+      const targetUnit=stockMeasure(target?.name,target?.unit).unit;
+      for(const [field,label,name,unit,previous] of [
+        ['min_qty','Cantidad mínima',values.name,values.unit,i.min_qty],
+        ['source_qty','Cantidad de materia prima por preparación',values.name,values.unit,sameTarget?rule.source_qty:null],
+        ['target_qty','Cantidad de producto resultante',target?.name,target?.unit,sameTarget?rule.target_qty:null],
+      ]){
+        const control=form.elements.namedItem(field);
+        const displayUnit=stockMeasure(name,unit).unit;
+        quantityLabel(control,displayUnit?`${label} (${displayUnit})`:label);
+        setItemQuantityStep(control,name,field==='min_qty',stockInputValue(name,unit,previous)||null);
+      }
+      const count=Number(values.transform_qty);
+      dialog.querySelector('#inv-transform-summary').textContent=target?
+        `Se descontarán ${fmt(Number(values.source_qty)*count)} ${sourceUnit} de ${values.name} y se ingresarán ${fmt(Number(values.target_qty)*count)} ${targetUnit} de ${target.name}.`:
+        'Selecciona el producto resultante para transformar.';
+    };
+    form.addEventListener('input',update);
+    form.addEventListener('change',update);
+    update();
+  }
+  function formItemClassification(i) {
+    const fields=select('category','Categoría',asOptions(S.categories),i.category)+
+      input('new_category','Nueva categoría (opcional)','text','','maxlength="60"')+
+      select('area','Área responsable',asOptions(S.areas),i.area)+
+      sharedAreaNotice(i);
+    modal(`Cambiar categoría o área · ${i.code} · ${i.name}`,fields,values=>{
+      const category=values.new_category.trim()||values.category;
+      const area=values.area;
+      const changes={id:i.id};
+      if(category!==i.category)changes.category=category;
+      if(area!==i.area)changes.area=area;
+      return run('inv.item_category',changes,'Insumo actualizado');
+    });
   }
   function formUse(i) {
-    const field = input('qty',`Cantidad a consumir (${i.unit})`,'number','','required min="0.001" step="0.001" max="'+Number(i.available)+'"') +
+    const step=itemQuantityStep(i.name);
+    const unit=stockMeasure(i.name,i.unit).unit;
+    const available=stockInputValue(i.name,i.unit,i.available);
+    const field = input('qty',`Cantidad a consumir (${unit})`,'number','',`required min="${step}" step="${step}" max="${available}"`) +
       input('reason','Motivo del consumo','text','','required maxlength="300" placeholder="Actividad del área"');
-    modal(`Consumo de ${i.name}`,field,values => run('inv.use',{...values,item_id:i.id},'Consumo registrado'),'Registrar salida');
+    modal(`Consumo de ${i.name}`,field,values => run('inv.use',{
+      ...values,item_id:i.id,qty:stockQuantityPayload(i.name,i.unit,values.qty)
+    },'Consumo registrado'),'Registrar salida');
   }
   function lotsPanel(i) {
-    const lots = S.lots.filter(l => Number(l.item_id) === Number(i.id));
-    const lotRows = lots.map(l => [h(l.code),h(l.expiry || 'Sin vencimiento'),fmt(l.physical),fmt(l.reserved),fmt(l.available)]);
+    const source=itemById(i.base_id)||i;
+    const lots = S.lots.filter(l => Number(l.item_id) === Number(source.id));
+    const lotRows = lots.map(l => [h(l.code),h(l.expiry || 'Sin vencimiento'),h(stockQuantity(source,l.reserved)),h(stockQuantity(source,l.available))]);
     const canConsume = isAdmin() || (['area','atencion','recepcion'].includes(S.user.role) &&
-      String(S.user.area || ({recepcion:'Limpieza',atencion:'Atención'}[S.user.role] || '')).toLowerCase() === i.area.toLowerCase());
-    const actions = (canConsume && i.available>0 ? button('Registrar consumo',()=>formUse(i),'primary') : '') +
+      S.inventory_access_areas.includes(i.area));
+    const actions = (canConsume && stockInputValue(i.name,i.unit,i.available)>=itemQuantityStep(i.name) ? button('Registrar consumo',()=>formUse(i),'primary') : '') +
       (isAdmin() ? button('Editar insumo',()=>formItem(i)) : '') + button('Cerrar',()=>{ detail=null; refreshPanel(); });
-    return panel(`Lotes de ${i.name} (${i.unit})`,
-      table(['Lote','Vencimiento','Físico','Reservado','Disponible'],lotRows,'Este insumo aún no tiene lotes con existencias.'),actions);
+    return panel(`Lotes de ${source.name}`,
+      table(['Lote','Vencimiento','Reservado','Disponible'],lotRows,'Este insumo aún no tiene lotes con existencias.'),actions);
   }
   function stockTable() {
-    const needle = search.trim().toLocaleLowerCase('es');
     const rows = S.items.filter(i=>(!area || i.area===area) && (!category || i.category===category) &&
-      (!needle || (i.code+' '+i.name).toLocaleLowerCase('es').includes(needle))).map(i=>[
-        itemLabel(i),h(i.area),`${fmt(i.physical)} ${h(i.unit)}`,fmt(i.reserved),`<strong>${fmt(i.available)}</strong>`,
+      (!selectedItem || String(i.id)===selectedItem)).map(i=>[
+        h(i.code),`<strong>${h(i.name)}</strong><br><small class="muted">${h(i.category)}${i.base_id?` · ${i.factor} cuartos por unidad<br>Stock compartido con ${h(i.base_code)} · ${fmt(i.available_portions)} cuartos disponibles`:""}</small>`,
+        h(i.area),h(i.base_id?formatStockQuantity('Pollo cocido','cuartos',i.reserved*i.factor):stockQuantity(i,i.reserved)),
+        `<strong>${h(stockQuantity(i,i.available))}</strong>`,
         badge(i.available===0 ? 'Agotado' : i.available<=i.min_qty ? 'Stock bajo' : 'Disponible'),
-        button('Ver lotes',()=>{ detail=i.id; refreshPanel(); document.getElementById('inventory-detail')?.scrollIntoView({block:'nearest'}); })
+        (isAdmin()?button('Editar',()=>formItem(i),'secondary')+button('Cambiar categoría o área',()=>formItemClassification(i),'secondary'):'')+button('Ver lotes',()=>{ detail=i.id; refreshPanel(); document.getElementById('inventory-detail')?.scrollIntoView({block:'nearest'}); })
       ]);
-    return table(['Insumo','Área','Físico','Reservado','Disponible','Estado','Detalle'],rows,'No hay insumos que coincidan con los filtros.');
+    return table(['Código','Insumo','Área','Reservado','Disponible','Estado','Acciones'],rows,'No hay insumos que coincidan con los filtros.');
   }
   function stockPanel() {
+    if(!S.areas.includes(area))area='';
+    if(!S.categories.includes(category))category='';
     const filter = `<div class="actions" style="flex-wrap:wrap;margin-bottom:16px">
-      <label class="field">Buscar insumo<input id="inv-search" type="search" placeholder="Código o nombre" value="${h(search)}"></label>
+      <label class="field">Buscar insumo<select id="inv-search">${option('','Todos los insumos',selectedItem)}${S.items.map(i=>option(i.id,`${i.code} · ${i.name}`,selectedItem)).join('')}</select></label>
       <label class="field">Área<select id="inv-area">${option('','Todas las áreas',area)}${S.areas.map(v=>option(v,v,area)).join('')}</select></label>
       <label class="field">Categoría<select id="inv-category">${option('','Todas las categorías',category)}${S.categories.map(v=>option(v,v,category)).join('')}</select></label>
       </div>`;
@@ -80,33 +166,87 @@
   }
 
   function recipeRow(line={}) {
-    return `<div class="grid2" data-recipe-line style="align-items:end;margin:8px 0;grid-template-columns:minmax(0,2fr) minmax(82px,1fr) auto">
+    const ingredient=itemById(line.item_id);
+    const unit=stockMeasure(ingredient?.name,ingredient?.unit).unit;
+    const value=stockInputValue(ingredient?.name,ingredient?.unit,line.qty);
+    const step=itemQuantityStep(ingredient?.name,value);
+    return `<div class="grid2" data-recipe-line data-previous-item="${h(line.item_id)}" data-previous-qty="${h(value)}" style="align-items:end;margin:8px 0;grid-template-columns:minmax(0,2fr) minmax(82px,1fr) auto">
       <label class="field">Insumo<select data-recipe-item required>${option('','Seleccionar',line.item_id)}${itemOptions(S.items).map(([v,label])=>option(v,label,line.item_id)).join('')}</select></label>
-      <label class="field">Cantidad<input data-recipe-qty type="number" required min="0.001" step="0.001" value="${h(String(line.qty ?? ''))}"></label>
+      <label class="field"><span>Cantidad${unit?' ('+h(unit)+')':''}</span><input data-recipe-qty type="number" required min="${step}" step="${step}" value="${h(value)}"></label>
       <button type="button" class="btn secondary" data-recipe-remove aria-label="Quitar insumo">Quitar</button></div>`;
   }
   function formProduct(prod={}) {
+    const presets=(S.portion_groups||[]).map(group=>[ [1,0.5,'¼ pollo'],[2,1.5,'½ pollo'],[4,3,'1 pollo'] ].map(([portions,potato,label])=>button(label,()=>{
+      const rows=document.querySelector('#inv-recipe-rows');
+      const existing=Array.from(rows.querySelectorAll('[data-recipe-line]'),row=>{
+        const id=Number(row.querySelector('[data-recipe-item]').value);
+        const ingredient=itemById(id);
+        const factor=stockMeasure(ingredient?.name,ingredient?.unit).factor;
+        const value=row.querySelector('[data-recipe-qty]').value;
+        return {item_id:id,qty:value===''?'':Number(value)/factor};
+      });
+      const recipe=existing.filter(r=>r.item_id&&r.item_id!==group.base_id&&r.item_id!==group.potato_id);
+      recipe.push({item_id:group.base_id,qty:portions},{item_id:group.potato_id,qty:potato});
+      rows.innerHTML=recipe.map(recipeRow).join('');
+    })).join('')).join('');
     const fields = input('name','Nombre del producto','text',prod.name || '','required maxlength="100"') +
-      input('category','Sección de la carta','text',prod.category || '','required maxlength="60" placeholder="Brasas"') +
+      input('category','Categoría','text',prod.category || '','required list="categorias-carta" maxlength="120"') +
+      `<datalist id="categorias-carta">${(S.menu_categories||[]).map(c=>`<option value="${h(c)}"></option>`).join('')}</datalist>` +
       input('price','Precio de venta (S/)','number',prod.price ?? '','min="0.01" step="0.01" required') +
       select('prep_area','Área responsable de preparación',[["Cocina","Cocina"],["Barra","Barra"],["Parrilla","Parrilla"]],prod.prep_area||"Cocina") +
-      `<div class="full"><strong>Insumos por unidad vendida</strong><div id="inv-recipe-rows">${(prod.recipe || [{}]).map(recipeRow).join('')}</div>
+      `<div class="full"><strong>Insumos por unidad vendida</strong><div class="actions">${presets}</div><div id="inv-recipe-rows">${(prod.recipe || [{}]).map(recipeRow).join('')}</div>
         <button type="button" class="btn secondary" data-recipe-add>Agregar insumo</button></div>`;
-    modal(prod.id ? `Editar ${prod.code}` : 'Nuevo producto de carta',fields, values=>{
-      const recipe=Array.from(document.querySelectorAll('#inv-recipe-rows [data-recipe-line]'),row=>({
-        item_id:row.querySelector('[data-recipe-item]').value,qty:row.querySelector('[data-recipe-qty]').value
-      }));
+    const dialog=modal(prod.id ? `Editar ${prod.code}` : 'Nuevo producto de carta',fields, values=>{
+      const recipe=Array.from(document.querySelectorAll('#inv-recipe-rows [data-recipe-line]'),row=>{
+        const id=row.querySelector('[data-recipe-item]').value;
+        const ingredient=itemById(id);
+        return {item_id:id,qty:stockQuantityPayload(ingredient?.name,ingredient?.unit,row.querySelector('[data-recipe-qty]').value)};
+      });
       return run('inv.product',{...values,recipe,...(prod.id ? {id:prod.id} : {})},'Producto y receta guardados');
+    });
+    dialog.querySelector('form').addEventListener('input',event=>{
+      const row=event.target.closest('[data-recipe-line]');
+      if(!row)return;
+      const selected=row.querySelector('[data-recipe-item]').value;
+      const ingredient=itemById(selected);
+      const field=row.querySelector('[data-recipe-qty]');
+      const unit=stockMeasure(ingredient?.name,ingredient?.unit).unit;
+      quantityLabel(field,unit?`Cantidad (${unit})`:'Cantidad');
+      setItemQuantityStep(field,ingredient?.name,false,
+        selected===row.dataset.previousItem?row.dataset.previousQty:null);
     });
   }
   function productPanel() {
     const rows=S.products.map(p=>[
       `<strong>${h(p.name)}</strong><br><small class="muted">${h(p.code)}</small>`,h(p.category),h(p.prep_area||"Cocina"),cash(p.price),
-      (p.recipe || []).map(row=>{const i=itemById(row.item_id); return i ? `${h(i.name)} · ${fmt(row.qty)} ${h(i.unit)}` : '';}).filter(Boolean).join('<br>'),
+      (p.recipe || []).map(row=>{const i=itemById(row.item_id); return i ? `${h(i.name)} · ${h(stockQuantity(i,row.qty))}` : '';}).filter(Boolean).join('<br>'),
       fmt(p.available),button('Editar',()=>formProduct(p))
     ]);
     const create=S.items.length ? button('Nuevo producto',()=>formProduct(),'primary') : button('Registrar primer insumo',()=>formItem(),'primary');
     return panel('Carta y recetas',table(['Producto','Sección','Área de preparación','Precio','Receta por unidad','Porciones posibles','Acción'],rows,'La carta está vacía. Registra insumos para crear una receta.'),create);
+  }
+  function categoryForm(previous){
+    modal(previous?"Renombrar categoría":"Nueva categoría",input("name","Nombre","text",previous||"","required maxlength=120"),
+      v=>run("inv.menu_category",{name:v.name,previous},"Categoría guardada"));
+  }
+  pages.carta=()=>{
+    if(S.user.role==="area")return panel("Productos de "+S.user.area,table(["Producto","Categoría"],
+      (S.area_menu||[]).map(p=>[h(p.name),h(p.category)]),"Todavía no hay productos asignados a esta área."));
+    return productPanel()+panel("Categorías",table(["Categoría","Acción"],S.menu_categories.map(c=>[h(c),button("Renombrar",()=>categoryForm(c),"link")])),
+      button("Nueva categoría",()=>categoryForm(""),"primary"));
+  };
+  function formPortions() {
+    const items=itemOptions(S.items.filter(i=>!i.base_id));
+    const products=[['','Sin asignar'],...S.products.map(p=>[p.id,`${p.code} · ${p.name}`])];
+    const group=S.portion_groups?.[0]||{};
+    const fields=select('raw_id','Pollo crudo',items,group.raw_id)+
+      select('base_id','Stock de cuartos de pollo cocido',items,group.base_id)+
+      select('potato_id','Papa (kg)',items,group.potato_id)+
+      select('quarter_product_id','Producto de carta de ¼ pollo',products)+
+      select('half_product_id','Producto de carta de ½ pollo',products)+
+      select('whole_product_id','Producto de carta de 1 pollo',products)+
+      '<p>Dos cuartos equivalen a un medio y cuatro a un entero. Se muestran como stock compartido. La transformación convierte 1 pollo crudo en 1 entero cocido (4 cuartos). Papa por plato: 0,5 kg, 1,5 kg y 3 kg. Las recetas se aplican a nuevas comandas.</p>';
+    modal('Equivalencias de pollo',fields,values=>run('inv.portions',values,'Equivalencias y recetas guardadas'));
   }
   function formRule() {
     const source=itemOptions(S.items.filter(i=>i.transformable));
@@ -114,12 +254,30 @@
       input('source_qty','Cantidad consumida','number',1,'min="0.001" step="0.001" required') +
       select('target_id','Insumo preparado',itemOptions(S.items)) +
       input('target_qty','Cantidad producida','number',1,'min="0.001" step="0.001" required');
-    modal('Equivalencia de preparación',fields,values=>run('inv.rule',values,'Equivalencia guardada'));
+    const dialog=modal('Equivalencia de preparación',fields,values=>{
+      for(const side of ['source','target']){
+        const selected=itemById(values[side+'_id']);
+        values[side+'_qty']=stockQuantityPayload(selected?.name,selected?.unit,values[side+'_qty']);
+      }
+      return run('inv.rule',values,'Equivalencia guardada');
+    });
+    const form=dialog.querySelector('form');
+    const update=()=>{
+      for(const side of ['source','target']){
+        const selected=itemById(form.elements.namedItem(side+'_id').value);
+        const field=form.elements.namedItem(side+'_qty');
+        const unit=stockMeasure(selected?.name,selected?.unit).unit;
+        quantityLabel(field,`Cantidad ${side==='source'?'consumida':'producida'}${unit?' ('+unit+')':''}`);
+        setItemQuantityStep(field,selected?.name);
+      }
+    };
+    form.addEventListener('change',update);
+    update();
   }
   function transformPanel() {
     const rows = S.rules.map(r=>{
       const raw=itemById(r.source_id),prepared=itemById(r.target_id);
-      return [h(r.code),`${fmt(r.source_qty)} ${h(raw.unit)} · ${h(raw.name)}`,`${fmt(r.target_qty)} ${h(prepared.unit)} · ${h(prepared.name)}`,
+      return [h(r.code),`${h(stockQuantity(raw,r.source_qty))} · ${h(raw.name)}`,`${h(stockQuantity(prepared,r.target_qty))} · ${h(prepared.name)}`,
         button('Preparar',()=>{
           const fields=input('qty','Número de preparaciones','number',1,'min="1" step="1" required') +
             input('expiry','Vencimiento del preparado','date','','');
@@ -127,7 +285,7 @@
         })];
     });
     return panel('Transformaciones por equivalencia',table(['Código','Materia prima','Resultado','Acción'],rows,'Aún no hay equivalencias para esta área.'),
-      isAdmin() && S.items.some(i=>i.transformable) ? button('Definir equivalencia',formRule,'primary') : '');
+      (isAdmin() && S.items.some(i=>i.transformable) ? button('Definir equivalencia',formRule,'primary') : '')+(isAdmin()?button('Equivalencias de pollo',formPortions):''));
   }
   function inventoryPanel() {
     const tabs=[['stock','Existencias']];
@@ -163,7 +321,7 @@
     const rows=list.map(m=>[
       `<strong>${h(m.code)}</strong><br><small class="muted">${h(m.at)}</small>`,
       `${h(m.item)}<br><small class="muted">${h(m.lot_code)} · ${h(m.area)}</small>`,
-      badge(m.qty>0 ? 'Entrada' : 'Salida'),`<strong>${m.qty>0 ? '+' : ''}${fmt(m.qty)} ${h(m.unit)}</strong>`,
+      badge(m.qty>0 ? 'Entrada' : 'Salida'),`<strong>${m.qty>0 ? '+' : ''}${h(formatStockQuantity(m.item,m.unit,m.qty))}</strong>`,
       `${h(m.reason)}<br><small class="muted">${h(m.ref || '')}</small>`,h(m.operator)
     ]);
     const criteria=[historyFilter.start && 'Desde '+historyFilter.start,historyFilter.end && 'Hasta '+historyFilter.end,historyFilter.area,
@@ -182,15 +340,10 @@
     if(e.target.closest('[data-recipe-add]')) document.getElementById('inv-recipe-rows')?.insertAdjacentHTML('beforeend',recipeRow());
     if(e.target.closest('[data-recipe-remove]')) e.target.closest('[data-recipe-line]')?.remove();
   });
-  document.addEventListener('input',e=>{
-    if (e.target.id!=='inv-search') return;
-    search=e.target.value;
-    document.getElementById('inv-results').innerHTML=stockTable();
-    prune();
-  });
   document.addEventListener('change',e=>{
-    if(e.target.id!=='inv-area' && e.target.id!=='inv-category') return;
-    if(e.target.id==='inv-area') area=e.target.value;
+    if(!['inv-search','inv-area','inv-category'].includes(e.target.id)) return;
+    if(e.target.id==='inv-search') selectedItem=e.target.value;
+    else if(e.target.id==='inv-area') area=e.target.value;
     else category=e.target.value;
     document.getElementById('inv-results').innerHTML=stockTable();
     prune();

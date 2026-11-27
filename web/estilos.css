@@ -14,3 +14,88 @@
 .prep-card .btn{margin-top:auto}.prep-status{display:flex;align-items:center;gap:10px}
 .ticket-ref .grid2{display:grid;grid-template-columns:1fr;gap:9px}
 .ticket-ref select{width:100%;min-width:0}
+
+#purchase-print {
+  display: none;
+}
+
+@media print {
+  @page {
+    size: A4;
+    margin: 16mm;
+    @bottom-right {
+      content: "Página " counter(page) " de " counter(pages);
+      color: #59615c;
+      font: 8pt Arial, sans-serif;
+    }
+  }
+  html:has(body.printing-purchase) {
+    background: white;
+  }
+  body.printing-purchase {
+    margin: 0;
+    background: white;
+  }
+  .printing-purchase > :not(#purchase-print),
+  .printing-purchase dialog::backdrop {
+    display: none !important;
+  }
+  .printing-purchase #purchase-print {
+    display: block;
+    color: #202725;
+    font: 10pt/1.4 Arial, sans-serif;
+    print-color-adjust: exact;
+    -webkit-print-color-adjust: exact;
+  }
+  #purchase-print .purchase-print-heading {
+    border-bottom: 2pt solid #b63f24;
+    margin-bottom: 6mm;
+    padding-bottom: 4mm;
+  }
+  #purchase-print h1 {
+    font-size: 22pt;
+    margin: 2mm 0;
+  }
+  #purchase-print h2 {
+    font-size: 13pt;
+    margin-bottom: 1mm;
+  }
+  #purchase-print .purchase-print-order {
+    margin-top: 5mm;
+  }
+  #purchase-print h2,
+  #purchase-print .purchase-print-order > p:not(.purchase-print-total) {
+    break-after: avoid;
+  }
+  #purchase-print .table-wrap {
+    margin-top: 2mm;
+    overflow: visible;
+  }
+  #purchase-print table {
+    width: 100%;
+    font-size: 10pt;
+  }
+  #purchase-print tr {
+    break-inside: avoid;
+  }
+  #purchase-print th {
+    background: #edf0e8;
+    color: #202725;
+  }
+  #purchase-print th:nth-child(n+2),
+  #purchase-print td:nth-child(n+2) {
+    text-align: right;
+    white-space: nowrap;
+  }
+  #purchase-print .purchase-print-total {
+    break-inside: avoid;
+    text-align: right;
+    margin-top: 2mm;
+  }
+  #purchase-print .purchase-print-grand {
+    border-top: 1pt solid #b63f24;
+    margin-top: 5mm;
+    padding-top: 2mm;
+    font-size: 13pt;
+  }
+}

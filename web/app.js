@@ -5,7 +5,10 @@ const roleNames = {admin:"Administración",caja:"Caja",atencion:"Atención",area
 const nav = [
   ["atencion","Atención","grid","OPERACIÓN",["admin","caja","atencion"],"Sala y pedidos","Selecciona los productos para armar una comanda."],
   ["preparacion","Preparación y entregas","plate","",["admin","area"],"Pedidos en preparación","Consulta solamente los pedidos de tu área y marca su avance."],
-  ["comandas","Comandas","receipt","",["admin","caja","atencion"],"Comandas","Consulta las reservas, cobra pedidos y revisa las ventas."],
+  ["comandas","Comandas","receipt","",["admin","caja","atencion"],"Comandas","Consulta las comandas y los productos de cada mesa."],
+  ["solicitudes","Solicitudes y devoluciones","receipt","",["admin","caja","atencion"],"Solicitudes y devoluciones","Consulta el estado de las anulaciones y devoluciones."],
+  ["carta","Carta y categorías","plate","",["admin","area"],"Carta y categorías","Productos por categoría y área de preparación."],
+  ["jornadas","Jornadas","calendar","",["admin","caja"],"Registro de jornadas","Consulta una fecha o ábrela para trabajar con ella en todo el local."],
   ["ventas","Ventas","flow","",["admin","caja"],"Reporte de ventas","Consulta los cobros y las devoluciones según la fecha en que se registraron."],
   ["inventario","Inventario","box","INVENTARIO",Object.keys(roleNames),"Inventario","Consulta existencias, lotes y recetas por área."],
   ["movimientos","Movimientos","flow","",Object.keys(roleNames),"Movimientos","Sigue las entradas y salidas de insumos por fecha."],
@@ -41,6 +44,46 @@ function brand(){return `<div class="brand"><i>${icon("flame")}</i><div><b>Junio
 function h(value){return String(value??"").replace(/[&<>"']/g,c=>({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]))}
 function cash(n){return `S/ ${Number(n||0).toLocaleString("es-PE",{minimumFractionDigits:2,maximumFractionDigits:2})}`}
 function fmt(n){return Number(n||0).toLocaleString("es-PE",{maximumFractionDigits:3})}
+function allowsDecimalQuantity(name){
+ const words=String(name||"").toLowerCase().split(/[^\p{L}\p{N}_]+/u);
+ return words.some(word=>["papa","papas","arroz"].includes(word));
+}
+function itemQuantityStep(name,previous=null,value=previous){
+ if(allowsDecimalQuantity(name))return 0.001;
+ return previous!=null&&Number(previous)%1!==0&&Number(value)===Number(previous)?0.001:1;
+}
+function setItemQuantityStep(field,name,allowZero=false,previous=null){
+ const step=itemQuantityStep(name,previous,field.value);
+ field.step=step;
+ field.min=allowZero?0:step;
+}
+function stockMeasure(name,unit){
+ if(allowsDecimalQuantity(name))return {unit,factor:1};
+ const key=String(unit||"").trim().toLowerCase();
+ if(["kg","kgs","kilo","kilos","kilogramo","kilogramos"].includes(key))return {unit:"g",factor:1000};
+ if(["l","lt","lts","litro","litros"].includes(key))return {unit:"mL",factor:1000};
+ return {unit,factor:1};
+}
+function stockInputValue(name,unit,quantity){
+ if(quantity==null||quantity==="")return "";
+ return stockMeasure(name,unit).factor===1000?Math.round(Number(quantity)*1000):quantity;
+}
+function stockQuantityPayload(name,unit,value){
+ const measure=stockMeasure(name,unit);
+ return measure.factor===1000?{unit:measure.unit,value}:value;
+}
+function formatStockQuantity(name,unit,quantity){
+ const measure=stockMeasure(name,unit);
+ const value=Number(stockInputValue(name,unit,quantity));
+ if(Number.isInteger(value))return `${value} ${measure.unit}`;
+ if(allowsDecimalQuantity(name))return `${fmt(value)} ${measure.unit}`;
+ const thousandths=Math.round(Math.abs(value)*1000);
+ const whole=Math.floor(thousandths/1000);
+ const fraction=thousandths%1000;
+ if(!fraction)return `${Math.round(value)} ${measure.unit}`;
+ const parts=whole?`${whole} + ${fraction}/1000`:`${fraction}/1000`;
+ return `${value<0?"−":""}${parts} ${measure.unit}`;
+}
 function exportCsv(filename,rows){
  const encode=value=>{
    if(typeof value==="number" && Number.isFinite(value))return String(value);
@@ -54,7 +97,7 @@ function exportCsv(filename,rows){
  document.body.append(link);link.click();link.remove();
  setTimeout(()=>URL.revokeObjectURL(url),1000);
 }
-function badge(text){const tone=/^(?:Cobrado|Aprobada|Recibida|Resuelta|Disponible|Activo|Activa)$/i.test(text)?"green":/^(?:Pendiente|Por revisar|Reservado|Parcial|Stock mínimo)$/i.test(text)?"amber":"";return `<span class="badge ${tone}">${h(text)}</span>`}
+function badge(text){const tone=/^(?:Cobrado|Aprobada|Recibida|Resuelta|Disponible|Activo|Activa)$/i.test(text)?"green":/^(?:Pendiente|Por revisar|Reservado|Parcial|Stock mínimo|Crítico)$/i.test(text)?"amber":"";return `<span class="badge ${tone}">${h(text)}</span>`}
 let callbacks=new Map(), seq=0;
 function bind(fn){const id=String(++seq); callbacks.set(id,fn);return `data-act="${id}"`}
 function button(label,fn,kind="secondary"){return `<button type="button" class="btn ${h(kind)}" ${bind(fn)}>${h(label)}</button>`}
@@ -141,8 +184,8 @@ function render(){
  const side=nav.map(([k,label,ic,section])=>{
    if(section)group=section;if(!allowed.some(x=>x[0]===k))return "";
    const heading=activeGroup===group?"":`<div class="nav-label">${group}</div>`;activeGroup=group;
-   const count=k==="preparacion"?(S.preparation||[]).filter(x=>x.status!=="Entregado").length:
-     k==="comandas"?(S.orders||[]).filter(o=>o.status==="Reservado"||o.status==="Por revisar").length:
+   const count=k==="preparacion"?(S.preparation||[]).filter(x=>x.day===S.today&&x.status!=="Entregado").length:
+     k==="comandas"?(S.orders||[]).filter(o=>o.day===S.today&&["Reservado","Por revisar"].includes(o.status)).length:
      k==="alertas"?(S.alerts||[]).filter(a=>!a.closed).length:0;
    const notice=k==="alertas"&&count?` aria-description="${count} alertas activas"`:"";
    return `${heading}<a href="#${k}" class="nav-link ${route===k?"selected":""}" ${route===k?'aria-current="page"':""}${notice}>${icon(ic)}${h(label)}${count?`<em${k==="alertas"?' aria-hidden="true"':""}>${count}</em>`:""}</a>`;
@@ -253,7 +296,7 @@ async function refreshSession(){
    const notice=observeAlerts(fresh,false);
    if(notice)toast(notice);
    const editing=document.querySelector("#dialog").open||["INPUT","SELECT","TEXTAREA"].includes(document.activeElement.tagName);
-   if(!editing&&["atencion","comandas","alertas"].includes(route)){S=fresh;render()}
+   if(!editing&&(fresh.today!==S.today||["jornadas","ventas","atencion","comandas","preparacion","solicitudes","alertas","recepcion"].includes(route))){S=fresh;render()}
  }catch{}finally{checkingSession=false}
 }
 setInterval(refreshSession,30000);

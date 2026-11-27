@@ -28,6 +28,7 @@ class Stub:
     def __init__(self, order=None, task=None, conflict=None, lines=None, delivered=0):
         self.order=order or {'id':1,'status':'Reservado','paid_at':None,'day':inv.today(),'version':1}
         self.task=task or {'area':'Cocina','status':'En cola'}
+        self.task["revision"]=1
         self.conflict=conflict
         self.lines=lines or []
         self.delivered=delivered
@@ -38,10 +39,10 @@ class Stub:
         if 'from inv_orders where id=' in s:return Cursor(self.order)
         if 'top(1) number from inv_orders' in s:return Cursor(self.conflict)
         if 'from inv_cancel_requests where order_id' in s:return Cursor()
-        if 'from inv_dispatch where order_id' in s and 'and product_id' in s:return Cursor(self.task)
-        if 'select count(*) from inv_lines' in s:return Cursor((1,))
-        if 'select count(*) from inv_dispatch' in s:return Cursor((self.delivered,))
-        if 'select l.product_id,p.prep_area' in s:return Cursor(rows=self.lines)
+        if 'from inv_details where order_id' in s and 'and detail_no' in s:return Cursor(self.task)
+        if 'select count(*),count(case' in s:return Cursor((1,self.delivered))
+        if 'select d.*,p.prep_area' in s:return Cursor(rows=self.lines)
+        if 'select * from inv_lines where order_id' in s:return Cursor(rows=self.lines)
         if 'insert into inv_cancel_requests' in s:return Cursor(lastrowid=7)
         return Cursor()
 
@@ -74,12 +75,16 @@ class TestAtencionV4(unittest.TestCase):
     def test_preparation_wrong_area_is_rejected(self):
         db=Stub(task={'area':'Barra','status':'En cola'})
         with self.assertRaises(PermissionError):
-            inv._advance_preparation(db,COOK,{'id':1,'product_id':8,'step':'preparar'})
-        self.assertFalse(any('update inv_dispatch' in q.lower() for q,_ in db.statements))
-    def test_preparation_out_of_order_is_rejected(self):
-        db=Stub(task={'area':'Cocina','status':'En cola'})
-        with self.assertRaisesRegex(ValueError,'Listo'):
-            inv._advance_preparation(db,COOK,{'id':1,'product_id':8,'step':'entregar'})
+            inv._advance_preparation(db,COOK,{'id':1,'product_id':8,'detail_no':1,'revision':1,'step':'preparar'})
+        self.assertFalse(any('update inv_details' in q.lower() for q,_ in db.statements))
+    def test_direct_delivery_from_each_pending_status(self):
+        for status in ("En cola","Preparando","Listo"):
+            with self.subTest(status=status):
+                db=Stub(task={"area":"Cocina","status":status})
+                result=inv._advance_preparation(db,COOK,{"id":1,"product_id":8,"detail_no":1,"revision":1,"step":"entregar"})
+                self.assertEqual(result["estado"],"Entregado")
+                update=next(args for sql,args in db.statements if sql.startswith("UPDATE inv_details"))
+                self.assertEqual(update[-1],status)
     def test_no_payment_before_delivery(self):
         db=Stub(delivered=0)
         with self.assertRaisesRegex(ValueError,'entregados'):
@@ -91,11 +96,11 @@ class TestAtencionV4(unittest.TestCase):
         self.assertFalse(any('update inv_orders set status' in q.lower() for q,_ in db.statements))
         self.assertFalse(any('reserved=reserved-' in q.lower() for q,_ in db.statements))
     def test_send_to_preparation_uses_area_from_catalog(self):
-        db=Stub(lines=[{'product_id':6,'prep_area':'Barra'}])
+        db=Stub(lines=[{'product_id':6,'qty':1,'detail_no':1,'sent_product':None,'sent_qty':None,'prep_area':'Barra'}])
         out=inv._send_to_areas(db,WAITER,{'id':1,'version':1})
         self.assertEqual(out['enviados'],1)
-        ins=[args for q,args in db.statements if 'insert into inv_dispatch' in q.lower()]
-        self.assertEqual(ins[0][2],'Barra')
+        ins=[args for q,args in db.statements if 'update inv_details set sent_product' in q.lower()]
+        self.assertEqual(ins[0][0],'Barra')
     def test_sql_schema_guards(self):
         schema=(ROOT/'sql'/'atencion_v4.sql').read_text('utf8')
         for token in ['ux_juniors_mesa_jornada_abierta','inv_dispatch','inv_cancel_requests','FOREIGN KEY(order_id,product_id)','juniors_version SET version=4']:

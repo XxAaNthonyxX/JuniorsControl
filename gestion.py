@@ -57,14 +57,13 @@ def _require(user, *roles):
 
 def _accessible(user, area):
     if user["role"] in ("area","atencion"):
-        assigned = user.get("area") or ("Atención" if user["role"]=="atencion" else "")
-        return assigned.casefold() == area.casefold()
+        return area in inv.inventory_access_areas(user)
     return True
 
 
 def _waste_accessible(user, area):
     if user["role"] == "recepcion":
-        return (user.get("area") or "Limpieza").casefold() == area.casefold()
+        return area in inv.inventory_access_areas(user)
     return _accessible(user, area)
 
 
@@ -104,18 +103,14 @@ def budget(db):
 
 def _receipt(db, user, p):
     _require(user, "admin", "recepcion")
-    item_id = _item(db, p.get("item_id"))["id"]
+    item = _item(db, p.get("item_id"))
     supplier = _text(p.get("supplier"), "proveedor", 100)
-    quantity = inv.qty(p.get("qty"))
+    quantity = inv.item_quantity(item["name"],p.get("qty"),unit=item["unit"])
     cost = _int(p.get("unit_cents", 0), "precio unitario")
     _cap_line(quantity, cost)
     cur = db.execute("""INSERT INTO g_receipts(item_id,supplier,qty_m,unit_cents,created,actor) OUTPUT INSERTED.id
-                        VALUES(?,?,?,?,?,?)""", (item_id, supplier, quantity, cost, stamp(), user["name"]))
+                        VALUES(?,?,?,?,?,?)""", (item["id"], supplier, quantity, cost, stamp(), user["name"]))
     return cur.lastrowid
-
-
-def _nonnegative_qty(value):
-    return 0 if re.fullmatch(r"0+(?:[.,]0{1,3})?",str(value)) else inv.qty(value)
 
 
 def _receive(db, user, p):
@@ -123,9 +118,12 @@ def _receive(db, user, p):
     r = _one(db, "SELECT * FROM g_receipts WHERE id=?", _int(p.get("id"), "recepción", 1))
     if r["approved_m"] is not None:
         raise ValueError("Esta recepción ya fue revisada.")
-    approved = _nonnegative_qty(p.get("approved"))
+    item = _item(db,r["item_id"])
+    approved = inv.item_quantity(item["name"],p.get("approved"),"Cantidad aprobada",unit=item["unit"],
+                                 minimum=0,previous=r["qty_m"])
     # En la interfaz anterior se conocía el total de la diferencia, sin su desglose.
-    received = _nonnegative_qty(p["received"]) if "received" in p else None
+    received = inv.item_quantity(item["name"],p["received"],"Cantidad entregada",unit=item["unit"],
+                                 minimum=0,previous=r["qty_m"]) if "received" in p else None
     if received is not None and approved > received:
         raise ValueError("La cantidad aprobada supera la entregada por el proveedor.")
     if approved > r["qty_m"]:
@@ -161,31 +159,40 @@ def _resolve(db, user, p):
     return issue["id"]
 
 
+def _reserve_waste(db, waste_id, plan):
+    for lot_id, amount, _ in plan:
+        db.execute("UPDATE inv_lots SET reserved=reserved+? WHERE id=?", (amount,lot_id))
+        db.execute("INSERT INTO g_waste_lots(waste_id,lot_id,amount) VALUES(?,?,?)", (waste_id,lot_id,amount))
+
+
+def reserve_pending_wastes(db):
+    pending=db.execute("SELECT id,item_id,qty_m,lot_id FROM g_wastes WHERE status='Pendiente' ORDER BY id").fetchall()
+    for waste in pending:
+        plan=inv._plan(db,waste["item_id"],waste["qty_m"],waste["lot_id"],allow_partial=True)
+        _reserve_waste(db,waste["id"],plan)
+
+
 def _waste(db, user, p):
     _require(user, "admin", "area", "recepcion")
     item = _item(db, p.get("item_id"))
     if not _waste_accessible(user, item["area"]):
         raise PermissionError("El insumo pertenece a otra área.")
-    lot_id = p.get("lot_id")
-    if lot_id not in (None,""):
-        lot_id = _int(lot_id, "lote", 1)
-        physical = _one(db,"SELECT physical FROM inv_lots WHERE id=? AND item_id=?",lot_id,item["id"])[0]
-    else:
-        lot_id = None
-        physical = _one(db,"SELECT coalesce(sum(physical),0) FROM inv_lots WHERE item_id=?",item["id"])[0]
-    quantity = inv.qty(p.get("qty"))
-    if quantity > physical:
-        raise ValueError("La cantidad reportada supera las existencias físicas.")
+    amount=inv.item_quantity(item["name"],p.get("qty"),unit=item["unit"])
+    source_id,quantity=inv.porciones.resolve(db,item["id"],amount)
+    lot_id = _int(p["lot_id"], "lote", 1) if p.get("lot_id") not in (None,"") else None
     reason = _text(p.get("reason"), "motivo de la merma", 500)
     at = stamp()
+    calendar_today = at[:10]
     try:
-        occurred = date.fromisoformat(p.get("occurred_on",at[:10])).isoformat()
+        occurred = date.fromisoformat(p.get("occurred_on",calendar_today)).isoformat()
     except (ValueError,TypeError):
         raise ValueError("Introduce una fecha válida para la merma.") from None
-    if occurred > at[:10]:
-        raise ValueError("La fecha de la merma no puede ser posterior a hoy.")
+    if occurred > calendar_today and occurred != inv.business_day(db):
+        raise ValueError("Selecciona hoy, una fecha anterior o la fecha de la jornada activa.")
+    plan=inv._plan(db,source_id,quantity,lot_id)
     cur = db.execute("""INSERT INTO g_wastes(item_id,lot_id,qty_m,reason,created,actor,status,occurred_on) OUTPUT INSERTED.id
-                        VALUES(?,?,?,?,?,?,'Pendiente',?)""", (item["id"],lot_id,quantity,reason,at,user["name"],occurred))
+                        VALUES(?,?,?,?,?,?,'Pendiente',?)""", (source_id,lot_id,quantity,reason,at,user["name"],occurred))
+    _reserve_waste(db,cur.lastrowid,plan)
     return cur.lastrowid
 
 
@@ -195,30 +202,37 @@ def _review_waste(db, user, p):
     if waste["status"] != "Pendiente":
         raise ValueError("La merma ya fue revisada.")
     approve = _flag(p)
-    if approve:
-        if waste["lot_id"]:
-            lot = _one(db,"SELECT physical,reserved FROM inv_lots WHERE id=?",waste["lot_id"])
-            if lot["physical"]>=waste["qty_m"] and lot["physical"]-lot["reserved"]<waste["qty_m"]:
-                raise ValueError("Parte del lote está reservada. Revisa las comandas afectadas y libera la cantidad necesaria antes de aprobar la merma.")
-        inv.withdraw(db,user,waste["item_id"],waste["qty_m"],"Merma: "+waste["reason"],
-                     f"ME{waste['id']:04d}",waste["lot_id"])
+    reserved=db.execute("SELECT lot_id,amount FROM g_waste_lots WHERE waste_id=?", (waste["id"],)).fetchall()
+    reason="Merma: "+waste["reason"]
+    ref=f"ME{waste['id']:04d}"
+    remaining=waste["qty_m"]-sum(part["amount"] for part in reserved)
+    if approve and remaining:
+        inv.withdraw(db,user,waste["item_id"],remaining,reason,ref,waste["lot_id"])
+    for part in reserved:
+        lot_id,amount=part["lot_id"],part["amount"]
+        db.execute("UPDATE inv_lots SET reserved=reserved-? WHERE id=?", (amount,lot_id))
+        if approve:
+            inv._move(db,user,lot_id,-amount,reason,ref)
+    db.execute("DELETE FROM g_waste_lots WHERE waste_id=?", (waste["id"],))
     db.execute("UPDATE g_wastes SET status=?,reviewed_at=?,reviewer=? WHERE id=?",
                ("Aprobada" if approve else "Rechazada",stamp(),user["name"],waste["id"]))
     return waste["id"]
 
 
-def _lines(db, rows):
+def _lines(db, rows, previous=None):
     if not isinstance(rows, list) or not rows:
         raise ValueError("Incluye al menos un insumo en la compra.")
     checked, seen = [], set()
+    previous = previous or {}
     for r in rows:
         if not isinstance(r, dict):
             raise ValueError("Comprueba los datos de cada línea.")
-        item_id = _item(db,r.get("item_id"))["id"]
+        item = _item(db,r.get("item_id"))
+        item_id = item["id"]
         if item_id in seen:
             raise ValueError("Agrupa la cantidad del mismo insumo en una sola línea.")
         seen.add(item_id)
-        quantity = inv.qty(r.get("qty"))
+        quantity = inv.item_quantity(item["name"],r.get("qty"),unit=item["unit"],previous=previous.get(item_id))
         cost = _int(r.get("unit_cents"), "precio unitario")
         _cap_line(quantity, cost)
         checked.append((item_id, quantity, cost))
@@ -242,8 +256,21 @@ def _purchase(db, user, p):
     lines = _lines(db,p.get("lines"))
     supplier = _text(p.get("supplier",""), "proveedor", 100, optional=True)
     delegate = _assignee(db,p.get("assignee_id"))
-    cur = db.execute("""INSERT INTO g_purchases(origin,created,actor,supplier,assignee_id,status) OUTPUT INSERTED.id
-                        VALUES('Manual',?,?,?,?,'Borrador')""",(stamp(),user["name"],supplier,delegate))
+    created = stamp()
+    origin = "Manual"
+    if p.get("source_purchase_id"):
+        source = _one(db,"SELECT * FROM g_purchases WHERE id=?",
+                      _int(p["source_purchase_id"],"compra de origen",1))
+        if source["status"] not in ("Enviada","Recibida"):
+            raise ValueError("La hoja de origen debe estar cursada o recibida.")
+        day = source["purchase_day"] or source["created"][:10]
+        origin = "Ampliación de " + inv.public("OC",source["id"])
+    else:
+        day = inv._date(p.get("purchase_day",created[:10]))
+        if day > created[:10]:
+            raise ValueError("Selecciona hoy o una fecha anterior para el lote de compra.")
+    cur = db.execute("""INSERT INTO g_purchases(origin,created,actor,supplier,assignee_id,status,purchase_day) OUTPUT INSERTED.id
+                        VALUES(?,?,?,?,?,'Borrador',?)""",(origin,created,user["name"],supplier,delegate,day))
     _put_lines(db,cur.lastrowid,lines)
     return cur.lastrowid
 
@@ -265,11 +292,11 @@ def _edit_purchase(db, user, p):
     if "assignee_id" in p and user["role"] == "admin":
         delegate = _assignee(db,p["assignee_id"])
     if "lines" in p:
-        lines = _lines(db,p["lines"])
+        previous = dict(db.execute("SELECT item_id,qty_m FROM g_lines WHERE purchase_id=?",(purchase["id"],)))
+        lines = _lines(db,p["lines"],previous)
         if user["role"] != "admin":
             # La delegación permite cotizar la hoja asignada, no consultar otros insumos.
-            permitted = {r[0] for r in db.execute("SELECT item_id FROM g_lines WHERE purchase_id=?",(purchase["id"],))}
-            if any(item_id not in permitted for item_id,_,_ in lines):
+            if any(item_id not in previous for item_id,_,_ in lines):
                 raise PermissionError("La delegación solo permite editar los insumos de la hoja asignada.")
         db.execute("DELETE FROM g_lines WHERE purchase_id=?",(purchase["id"],))
         _put_lines(db,purchase["id"],lines)
@@ -353,17 +380,39 @@ def _report(db, actor, scheduled, stocks=None, at=None):
             continue
         # Restablecer un objetivo de dos mínimos; en un mínimo cero proponemos una unidad.
         suggested = max(1000 if minimum == 0 else 1, minimum*2-available)
+        if not inv.allows_decimal(item["name"]) and item["unit"].strip().casefold() not in inv.SMALL_STOCK_UNITS:
+            suggested = ((suggested+999)//1000)*1000
         shortages.append((item["id"],available,minimum,suggested))
         lines.append((item["id"],suggested,_price(db,item["id"])))
     purchase_id = None
     if lines:
-        purchase_id = db.execute("""INSERT INTO g_purchases(origin,created,actor,supplier,status) OUTPUT INSERTED.id
-                                    VALUES('Faltantes',?,?,'','Borrador')""",(created,actor)).lastrowid
+        purchase_id = db.execute("""INSERT INTO g_purchases(origin,created,actor,supplier,status,purchase_day) OUTPUT INSERTED.id
+                                    VALUES('Faltantes',?,?,'','Borrador',?)""",(created,actor,day)).lastrowid
         _put_lines(db,purchase_id,lines)
     report_id = db.execute("INSERT INTO g_reports(day,created,scheduled,purchase_id) OUTPUT INSERTED.id VALUES(?,?,?,?)",
                            (day,created,int(scheduled),purchase_id)).lastrowid
     db.executemany("INSERT INTO g_shortage VALUES(?,?,?,?,?)",((report_id,*s) for s in shortages))
     return report_id
+
+
+def _configure_alerts(db, user, payload):
+    _require(user, "admin")
+    item = inv._item(db, payload.get("item_id"))
+    minimum = inv.item_quantity(item["name"],payload.get("min_qty"),"Cantidad mínima crítica",unit=item["unit"],
+                                minimum=0,previous=item["min_qty"])
+
+    if "warn_days" in payload:
+        source_id, _ = inv.porciones.resolve(db, item["id"], 0)
+        source = item if source_id == item["id"] else inv._item(db, source_id)
+        if not source["perishable"]:
+            raise ValueError("Selecciona un insumo que requiera vencimiento para configurar el aviso.")
+        days = inv._scaled(payload["warn_days"], 1, "Días de aviso", 0, 3650)
+        db.execute("""UPDATE inv_items SET warn_days=? WHERE id=? OR id IN
+                      (SELECT item_id FROM inv_stock_equivalents WHERE base_id=?)""",
+                   (days, source_id, source_id))
+
+    db.execute("UPDATE inv_items SET min_qty=? WHERE id=?", (minimum, item["id"]))
+    return item["id"]
 
 
 def _alerts(db, stocks):
@@ -372,8 +421,10 @@ def _alerts(db, stocks):
     active = {}
     for i in stocks:
         if i["available"] <= i["min_qty"]:
+            unit=inv.SMALL_STOCK_UNITS.get(i["unit"].strip().casefold()) if not inv.allows_decimal(i["name"]) else None
+            available=str(round(i["available"]*1000)) if unit else f"{i['available']:g}"
             active[f"min.{i['id']}"] = ("Stock mínimo",i["id"],
-                f"{i['name']} alcanzó el mínimo. Disponible al activar la alerta: {i['available']:g} {i['unit']}.")
+                f"{i['name']} alcanzó el mínimo. Disponible al activar la alerta: {available} {unit or i['unit']}.")
     for lot in inv.batches(db):
         if lot["physical"] <= 0 or not lot["expiry"]:
             continue
@@ -402,6 +453,7 @@ def tick(db):
 
 def act(db, user, action, payload):
     handlers = {
+        "gestion.configure_alerts":_configure_alerts,
         "gestion.receipt":_receipt, "gestion.receive":_receive, "gestion.resolve":_resolve,
         "gestion.waste":_waste, "gestion.review_waste":_review_waste,
         "gestion.purchase":_purchase, "gestion.edit_purchase":_edit_purchase,
@@ -409,6 +461,41 @@ def act(db, user, action, payload):
     }
     if action in handlers:
         result = handlers[action](db,user,payload)
+    elif action=="gestion.cash_day":
+        inv._role(user,"admin","caja")
+        day=date.fromisoformat(payload["day"]).isoformat() if payload.get("day") else None
+        previous=inv.business_day(db)
+        if payload.get("expected_day",previous)!=previous:
+            raise ValueError("La jornada cambió en otro equipo. Actualiza antes de abrir otra fecha.")
+        active=day or inv.today()
+        if previous!=active:
+            db.execute("IF NOT EXISTS(SELECT 1 FROM cash_days WHERE day=?) INSERT cash_days(day) VALUES(?)",(previous,previous))
+        db.execute("""IF NOT EXISTS(SELECT 1 FROM cash_days WHERE day=?)
+                      INSERT cash_days(day,opened_at,opened_by) VALUES(?,?,?)""",(active,active,inv.now(),user["name"]))
+        db.execute("UPDATE g_settings SET work_day=? WHERE id=1",(day,))
+        return {"day":active}
+    elif action in {"gestion.cash_expense","gestion.void_expense"}:
+        inv._role(user,"admin","caja")
+        day=inv.business_day(db)
+        if payload.get("day")!=day:
+            raise ValueError("La jornada cambió. Actualiza Caja antes de continuar.")
+        if action=="gestion.void_expense":
+            reason=inv._text(payload.get("reason"),"motivo",300)
+            if not db.execute("UPDATE cash_expenses SET void_reason=?,void_by=?,void_at=? WHERE id=? AND day=? AND void_at IS NULL",
+                              (reason,user["name"],inv.now(),inv._id(payload.get("id")),day)).rowcount:
+                raise ValueError("El gasto ya fue anulado o no existe.")
+        else:
+            kind=payload.get("kind")
+            if kind not in ("Personal","Mercado"):
+                raise ValueError("Tipo de gasto inválido.")
+            day=date.fromisoformat(payload.get("day","")).isoformat()
+            reference=inv._text(payload.get("reference"),"referencia",100)
+            if db.execute("SELECT id FROM cash_expenses WHERE day=? AND kind=? AND reference=? AND void_at IS NULL",(day,kind,reference)).fetchone():
+                raise ValueError("La referencia ya está registrada para esta jornada.")
+            db.execute("INSERT INTO cash_expenses(day,kind,reference,concept,cents,actor) VALUES(?,?,?,?,?,?)",
+                       (day,kind,reference,inv._text(payload.get("concept"),"concepto",300),
+                        inv._scaled(payload.get("amount"),100,"Importe"),user["name"]))
+        return {}
     elif action in {"gestion.fund","gestion.schedule"}:
         result = _configure(db,user,payload,funds=action=="gestion.fund")
     elif action == "gestion.report":
@@ -432,11 +519,21 @@ def state(db, user):
     receiving = user["role"] in {"admin","recepcion"}
     result = {"receipts":[], "wastes":[], "incidents":[], "alerts":[], "purchases":[],
               "reports":[], "budget":None, "schedule":None}
+    if user["role"] in ("admin","caja"):
+        result["registered_days"]=[dict(r) for r in db.execute("""WITH days(day) AS (
+            SELECT day FROM cash_days UNION SELECT day FROM inv_orders UNION SELECT day FROM cash_expenses
+            UNION SELECT COALESCE(s.cash_day,LEFT(o.paid_at,10)) FROM inv_sales s JOIN inv_orders o ON o.id=s.order_id
+            UNION SELECT COALESCE(cash_day,LEFT(at,10)) FROM inv_returns UNION SELECT cash_day FROM sale_voids UNION SELECT cash_day FROM refund_reversals UNION SELECT CAST(? AS nvarchar(10)))
+            SELECT days.day,d.opened_at,d.opened_by FROM days LEFT JOIN cash_days d ON days.day=d.day
+            WHERE days.day IS NOT NULL ORDER BY days.day DESC""",(inv.business_day(db),))]
+        result["cash_expenses"]=[dict(r) for r in db.execute("SELECT * FROM cash_expenses ORDER BY day DESC,id DESC")]
     if receiving:
-        for r in db.execute("""SELECT r.id,r.item_id,i.name item_name,i.unit,r.supplier,r.qty_m,
+        for r in db.execute("""SELECT r.id,r.item_id,i.code item_code,i.name item_name,i.unit,i.area,i.perishable,r.supplier,r.qty_m,
                 r.approved_m,r.received_m,r.reason,r.created,r.actor,r.reviewed_at,r.reviewer,r.unit_cents,
-                r.lot_id,l.expiry,k.purchase_id FROM g_receipts r JOIN inv_items i ON i.id=r.item_id
+                r.lot_id,l.expiry,k.purchase_id,COALESCE(p.purchase_day,LEFT(p.created,10)) purchase_day
+                FROM g_receipts r JOIN inv_items i ON i.id=r.item_id
                 LEFT JOIN g_lines k ON k.id=r.line_id LEFT JOIN inv_lots l ON l.id=r.lot_id
+                LEFT JOIN g_purchases p ON p.id=k.purchase_id
                 ORDER BY CASE WHEN r.approved_m IS NULL THEN 0 ELSE 1 END,r.id DESC"""):
             receipt = _with_code(r, "RC")
             expected, accepted = receipt.pop("qty_m"),receipt.pop("approved_m")
@@ -449,14 +546,16 @@ def state(db, user):
             if not admin:
                 receipt.pop("unit_cents")
             result["receipts"].append(receipt)
-        for r in db.execute("""SELECT p.id,p.receipt_id,r.item_id,i.name item_name,i.unit,r.supplier,
+        for r in db.execute("""SELECT p.id,p.receipt_id,r.item_id,k.purchase_id,i.name item_name,i.unit,r.supplier,
                 r.qty_m,r.received_m,r.approved_m,r.reason,p.created,r.reviewer AS actor,
                 p.resolution,p.closed,p.closer FROM g_incidents p JOIN g_receipts r ON r.id=p.receipt_id
-                JOIN inv_items i ON i.id=r.item_id ORDER BY CASE WHEN p.closed IS NULL THEN 0 ELSE 1 END,p.id DESC"""):
+                JOIN inv_items i ON i.id=r.item_id LEFT JOIN g_lines k ON k.id=r.line_id
+                ORDER BY CASE WHEN p.closed IS NULL THEN 0 ELSE 1 END,p.id DESC"""):
             issue = _with_code(r,"INC")
             expected,received,approved = issue.pop("qty_m"),issue.pop("received_m"),issue.pop("approved_m")
             issue["missing"] = None if received is None else inv.num(max(0,expected-received))
             issue["rejected"] = None if received is None else inv.num(received-approved)
+            issue["kind"] = "Rechazo" if (received or 0) > approved or (received is None and approved == 0) else "Faltante"
             issue["qty"] = inv.num(max(expected,received or 0)-approved)
             issue["status"] = "Resuelta" if issue["closed"] else "Abierta"
             result["incidents"].append(issue)
@@ -479,6 +578,7 @@ def state(db, user):
     purchases = {}
     for r in db.execute(query+" ORDER BY p.id DESC",args):
         purchase = _with_code(r,"OC")
+        purchase["purchase_day"] = purchase["purchase_day"] or purchase["created"][:10]
         purchase.update(lines=[], total_cents=0)
         purchases[r["id"]] = purchase
     if purchases:

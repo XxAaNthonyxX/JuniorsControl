@@ -124,6 +124,13 @@ def _aplicar_v4(db):
             db.execute(batch)
 
 
+def _aplicar_v14(db):
+    from gestion import reserve_pending_wastes
+
+    db.execute((ROOT/"sql/reservas_mermas_v14.sql").read_text(encoding="utf8"))
+    reserve_pending_wastes(db)
+
+
 def preparar(db):
     if db.execute("SELECT DB_ID()").fetchone()[0] <= 4:
         raise ValueError("Elige una base exclusiva de JuniorsControl.")
@@ -138,8 +145,44 @@ def preparar(db):
         if version == 3:
             db.execute((ROOT/"sql/compatibilidad_codigos_v3.sql").read_text(encoding="utf8"))
             _aplicar_v4(db)
-            return
+            version = 4
         if version == 4:
+            db.execute((ROOT/"sql/detalles_v5.sql").read_text(encoding="utf8"))
+            version = 5
+        if version == 5:
+            db.execute((ROOT/"sql/solicitudes_v6.sql").read_text(encoding="utf8"))
+            version = 6
+        if version == 6:
+            db.execute((ROOT/"sql/jornadas_v7.sql").read_text(encoding="utf8"))
+            version = 7
+        if version == 7:
+            db.execute((ROOT/"sql/deshacer_v8.sql").read_text(encoding="utf8"))
+            version = 8
+        if version == 8:
+            db.execute((ROOT/"sql/anular_venta_v9.sql").read_text(encoding="utf8"))
+            version = 9
+        if version == 9:
+            db.execute((ROOT/"sql/para_llevar_v10.sql").read_text(encoding="utf8"))
+            version = 10
+        if version == 10:
+            db.execute((ROOT/"sql/porciones_v11.sql").read_text(encoding="utf8"))
+            version = 11
+        if version == 11:
+            db.execute((ROOT/"sql/categorias_atencion_v12.sql").read_text(encoding="utf8"))
+            version = 12
+        if version == 12:
+            db.execute((ROOT/"sql/areas_insumos_v13.sql").read_text(encoding="utf8"))
+            version = 13
+        if version == 13:
+            _aplicar_v14(db)
+            version = 14
+        if version == 14:
+            db.execute((ROOT/"sql/pagos_mixtos_v15.sql").read_text(encoding="utf8"))
+            version = 15
+        if version == 15:
+            db.execute((ROOT/"sql/lotes_compras_v16.sql").read_text(encoding="utf8"))
+            return
+        if version == 16:
             return
         if version != 2:
             raise ValueError("Versión de esquema incompatible.")
@@ -152,3 +195,15 @@ def preparar(db):
     db.execute((ROOT/"sql/acceso_v3.sql").read_text(encoding="utf8"))
     db.execute((ROOT/"sql/compatibilidad_codigos_v3.sql").read_text(encoding="utf8"))
     _aplicar_v4(db)
+    db.execute((ROOT/"sql/detalles_v5.sql").read_text(encoding="utf8"))
+    db.execute((ROOT/"sql/solicitudes_v6.sql").read_text(encoding="utf8"))
+    db.execute((ROOT/"sql/jornadas_v7.sql").read_text(encoding="utf8"))
+    db.execute((ROOT/"sql/deshacer_v8.sql").read_text(encoding="utf8"))
+    db.execute((ROOT/"sql/anular_venta_v9.sql").read_text(encoding="utf8"))
+    db.execute((ROOT/"sql/para_llevar_v10.sql").read_text(encoding="utf8"))
+    db.execute((ROOT/"sql/porciones_v11.sql").read_text(encoding="utf8"))
+    db.execute((ROOT/"sql/categorias_atencion_v12.sql").read_text(encoding="utf8"))
+    db.execute((ROOT/"sql/areas_insumos_v13.sql").read_text(encoding="utf8"))
+    _aplicar_v14(db)
+    db.execute((ROOT/"sql/pagos_mixtos_v15.sql").read_text(encoding="utf8"))
+    db.execute((ROOT/"sql/lotes_compras_v16.sql").read_text(encoding="utf8"))

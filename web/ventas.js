@@ -58,6 +58,39 @@ function ventasPeriodo(orders,start,end){
 (() => {
  let owner=null,from="",to="",activeDay="";
  const money=cents=>cash(cents/100);
+ const resultLabel=value=>value<0?"Pérdida":value>0?"Ganancia":"Resultado";
+ const expensesFor=(start,end)=>(S.cash_expenses||[]).filter(e=>e.day>=start&&e.day<=end);
+ function cashResult(net,expenses){
+   const active=expenses.filter(e=>!e.void_at);
+   const personal=active.filter(e=>e.kind==="Personal").reduce((sum,e)=>sum+e.cents,0);
+   const market=active.filter(e=>e.kind==="Mercado").reduce((sum,e)=>sum+e.cents,0);
+   return {personal,market,expenses:personal+market,result:net-personal-market};
+ }
+ async function openCashCount(start,end){
+   await reload();
+   const sales=ventasPeriodo(S.orders,start,end);
+   const count=cashResult(sales.net,expensesFor(start,end));
+   const amounts=[
+     ["Ventas cobradas",sales.gross],["Devoluciones",-sales.refunded],["Anulaciones",-sales.voided],
+     ["Ventas netas",sales.net],["Gastos de personal",-count.personal],["Gastos de mercado",-count.market],
+     ["Total de gastos",-count.expenses],
+   ];
+   const period=start===end?displayDate(start):displayDate(start)+" al "+displayDate(end);
+   modal("Arqueo de caja",`<p>${h(period)}</p>${table(["Concepto","Importe"],amounts.map(([label,value])=>[h(label),money(value)]))}
+     <div class="total"><strong>${resultLabel(count.result)}</strong><strong>${money(count.result)}</strong></div>`,null);
+ }
+ function addExpense(){
+   modal("Registrar gasto",input("day","Jornada","date",S.today,"readonly required")+
+     input("receipt_preview","Boleta provisional","text",S.next_cash_expense_code,"readonly")+
+     select("kind","Tipo",[["Personal","Personal"],["Mercado","Mercado"]])+
+     input("reference","Referencia externa (opcional)","text","","maxlength=100")+
+     input("concept","Concepto","text","","required maxlength=300")+
+     input("amount","Importe (S/)","number","","min=0.01 step=0.01 required"),
+     async ({day,kind,reference,concept,amount})=>{
+       const expense=await run("gestion.cash_expense",{day,kind,reference,concept,amount},"");
+       toast("Gasto registrado · "+expense.code);
+     });
+ }
  function downloadReport(report){
    const rows=[["Fecha y hora","Operación","Código","Comanda","Jornada de comanda","Mesa o referencia","Responsable","Importe (S/)","Medios de pago"]];
    for(const e of report.entries)rows.push([e.at,e.kind,e.code,e.order,e.day,e.mesa,e.who,e.amount/100,formatPayments(e.payments)]);
@@ -110,15 +143,10 @@ function ventasPeriodo(orders,start,end){
       h(e.mesa),h(e.who),money(e.amount),button("Ver detalle de comanda",()=>details(S.orders.find(o=>o.id===e.id),true),"link")+(e.kind==="Cobro"?saleActions(S.orders.find(o=>o.id===e.id)):"")]);
    const products=r.products.map(p=>[h(p.name),fmt(p.sold),fmt(p.returned),money(p.amount)]);
    const filters=`<form id="ventas-filtro" class="actions filters">${input("desde","Desde","date",from,"required")}${input("hasta","Hasta","date",to,"required")}<button class="btn primary">Consultar</button></form>`;
-   const expenses=(S.cash_expenses||[]).filter(e=>e.day>=from&&e.day<=to);
-   const spent=kind=>expenses.filter(e=>!e.void_at&&e.kind===kind).reduce((sum,e)=>sum+e.cents,0);
-   const result=r.net-spent("Personal")-spent("Mercado");
-   const addExpense=()=>modal("Registrar gasto",input("day","Jornada","date",S.today,"readonly required")+
-     select("kind","Tipo",[["Personal","Personal"],["Mercado","Mercado"]])+input("reference","Referencia","text","","required")+
-     input("concept","Concepto","text","","required")+input("amount","Importe (S/)","number","","min=0.01 step=0.01 required"),
-     values=>run("gestion.cash_expense",values,"Gasto registrado"));
-   const expenseRows=expenses.map(e=>[h(e.day),h(e.kind),h(e.reference),h(e.concept),money(e.cents),h(e.actor),
-     e.void_at?h("Anulado · "+e.void_reason+" · "+e.void_by):e.day!==S.today?"Registrado":button("Anular",()=>modal("Anular gasto",input("reason","Motivo","text","","required"),
+   const expenses=expensesFor(from,to);
+   const count=cashResult(r.net,expenses);
+   const expenseRows=expenses.map(e=>[h(displayDate(e.day)),h(e.code),h(e.kind),h(e.reference||"—"),h(e.concept),money(e.cents),h(e.actor),
+     e.void_at?h("Anulado · "+e.void_reason+" · "+e.void_by):e.day!==S.today?"Registrado":button("Anular",()=>modal("Anular gasto · "+e.code,input("reason","Motivo","text","","required"),
        v=>run("gestion.void_expense",{id:e.id,day:e.day,reason:v.reason},"Gasto anulado")),"link")]);
    const methodOrder=new Set([...paymentMethods,"Sin especificar","Cambio",...r.collections.keys()]);
    const methods=[...methodOrder].map(method=>[method,r.collections.get(method)]).filter(([,amount])=>amount);
@@ -127,8 +155,10 @@ function ventasPeriodo(orders,start,end){
      async v=>{await run("gestion.cash_day",{...v,expected_day:expectedDay},"Jornada actualizada");from=S.today;to=S.today;render()}),"secondary");
    return collectionPanel()+panel("Período de caja",filters,jornada)+`<div class="metrics">${metric("Ventas cobradas",r.count)}${metric("Cobros",money(r.gross))}${metric("Devoluciones",money(r.refunded))}${metric("Anulaciones",money(r.voided))}${metric("Ingreso neto",money(r.net))}</div>`+
       (r.unlocated?`<p class="notice">El historial anterior contiene ${money(r.unlocated)} en devoluciones sin fecha registrada. El informe incluye los movimientos con fecha verificable.</p>`:"")+
-      panel("Arqueo de caja",`<div class="metrics">${metric("Ventas netas",money(r.net))}${metric("Personal",money(spent("Personal")))}${metric("Mercado",money(spent("Mercado")))}${metric(result<0?"Pérdida":result>0?"Ganancia":"Resultado",money(result))}</div>`+table(["Medio de pago","Cobros"],methods.map(([m,v])=>[h(m),money(v)]),"Sin cobros"))+
-      panel("Gastos de caja",table(["Fecha","Tipo","Referencia","Concepto","Importe","Responsable","Estado"],expenseRows,"Sin gastos"),button("Registrar gasto",addExpense,"primary"))+
+      panel("Arqueo de caja",`<div class="metrics">${metric("Ventas netas",money(r.net))}${metric("Personal",money(count.personal))}${metric("Mercado",money(count.market))}${metric(resultLabel(count.result),money(count.result))}</div>`+
+        table(["Medio de pago","Cobros"],methods.map(([m,v])=>[h(m),money(v)]),"Sin cobros"),
+        button("Calcular arqueo",()=>openCashCount(from,to),"primary"))+
+      panel("Gastos de caja",table(["Fecha","Boleta","Tipo","Referencia externa","Concepto","Importe","Responsable","Estado"],expenseRows,"Sin gastos"),button("Registrar gasto",addExpense,"primary"))+
       panel("Movimientos de caja",table(["Documento","Fecha de operación","Comanda","Mesa o referencia","Responsable","Importe","Acción"],records,"Sin cobros ni devoluciones en este período."),
             records.length?button("Descargar CSV",()=>downloadReport(r)):"")+
       panel("Ventas por producto",table(["Producto","Unidades cobradas","Devueltas","Importe neto"],products,"Sin productos en el período seleccionado."));

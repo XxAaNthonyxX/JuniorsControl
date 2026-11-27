@@ -135,6 +135,10 @@ def _aplicar_v17(db):
     for batch in (ROOT/"sql/unidades_insumos_v17.sql").read_text(encoding="utf8").split("\nGO\n"):
         db.execute(batch)
 
+def _aplicar_v21(db):
+    for batch in (ROOT/"sql/boletas_gastos_v21.sql").read_text(encoding="utf8").split("\nGO\n"):
+        db.execute(batch)
+
 
 def preparar(db):
     if db.execute("SELECT DB_ID()").fetchone()[0] <= 4:
@@ -198,8 +202,11 @@ def preparar(db):
             version = 19
         if version == 19:
             db.execute((ROOT/"sql/envio_lotes_v20.sql").read_text(encoding="utf8"))
-            return
+            version = 20
         if version == 20:
+            _aplicar_v21(db)
+            return
+        if version == 21:
             return
         if version != 2:
             raise ValueError("Versión de esquema incompatible.")
@@ -228,3 +235,4 @@ def preparar(db):
     db.execute((ROOT/"sql/retirar_detalles_v18.sql").read_text(encoding="utf8"))
     db.execute((ROOT/"sql/anular_cobradas_v19.sql").read_text(encoding="utf8"))
     db.execute((ROOT/"sql/envio_lotes_v20.sql").read_text(encoding="utf8"))
+    _aplicar_v21(db)

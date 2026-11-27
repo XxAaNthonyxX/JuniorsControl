@@ -572,6 +572,27 @@ def tick(db):
         _report(db,"Sistema",True,stocks,at)
 
 
+def _next_cash_expense_number(db,day):
+    return db.execute("SELECT COALESCE(MAX(receipt_no),0)+1 FROM cash_expenses WHERE day=?",(day,)).fetchone()[0]
+
+
+def _record_cash_expense(db,user,payload,day):
+    kind=payload.get("kind")
+    if kind not in ("Personal","Mercado"):
+        raise ValueError("Tipo de gasto inválido.")
+    reference=_text(payload.get("reference",""),"referencia externa",100,optional=True)
+    if reference and db.execute("SELECT id FROM cash_expenses WHERE day=? AND kind=? AND reference=? AND void_at IS NULL",
+                                (day,kind,reference)).fetchone():
+        raise ValueError("La referencia ya está registrada para esta jornada.")
+    concept=inv._text(payload.get("concept"),"concepto",300)
+    amount=inv._scaled(payload.get("amount"),100,"Importe")
+    number=_next_cash_expense_number(db,day)
+    receipt=db.execute("""INSERT INTO cash_expenses(day,receipt_no,kind,reference,concept,cents,actor)
+                         OUTPUT INSERTED.id VALUES(?,?,?,?,?,?,?)""",
+                       (day,number,kind,reference,concept,amount,user["name"])).lastrowid
+    return {"id":receipt,"code":inv.public("BL",number)}
+
+
 def act(db, user, action, payload):
     if action=="gestion.send_purchase_list":
         return _send_purchase_list(db,user,payload)
@@ -607,18 +628,8 @@ def act(db, user, action, payload):
             if not db.execute("UPDATE cash_expenses SET void_reason=?,void_by=?,void_at=? WHERE id=? AND day=? AND void_at IS NULL",
                               (reason,user["name"],inv.now(),inv._id(payload.get("id")),day)).rowcount:
                 raise ValueError("El gasto ya fue anulado o no existe.")
-        else:
-            kind=payload.get("kind")
-            if kind not in ("Personal","Mercado"):
-                raise ValueError("Tipo de gasto inválido.")
-            day=date.fromisoformat(payload.get("day","")).isoformat()
-            reference=inv._text(payload.get("reference"),"referencia",100)
-            if db.execute("SELECT id FROM cash_expenses WHERE day=? AND kind=? AND reference=? AND void_at IS NULL",(day,kind,reference)).fetchone():
-                raise ValueError("La referencia ya está registrada para esta jornada.")
-            db.execute("INSERT INTO cash_expenses(day,kind,reference,concept,cents,actor) VALUES(?,?,?,?,?,?)",
-                       (day,kind,reference,inv._text(payload.get("concept"),"concepto",300),
-                        inv._scaled(payload.get("amount"),100,"Importe"),user["name"]))
-        return {}
+            return {}
+        return _record_cash_expense(db,user,payload,day)
     elif action in {"gestion.fund","gestion.schedule"}:
         result = _configure(db,user,payload,funds=action=="gestion.fund")
     elif action == "gestion.report":
@@ -643,13 +654,16 @@ def state(db, user):
     result = {"receipts":[], "wastes":[], "incidents":[], "alerts":[], "purchases":[],
               "reports":[], "budget":None, "schedule":None}
     if user["role"] in ("admin","caja"):
+        active_day=inv.business_day(db)
         result["registered_days"]=[dict(r) for r in db.execute("""WITH days(day) AS (
             SELECT day FROM cash_days UNION SELECT day FROM inv_orders UNION SELECT day FROM cash_expenses
             UNION SELECT COALESCE(s.cash_day,LEFT(o.paid_at,10)) FROM inv_sales s JOIN inv_orders o ON o.id=s.order_id
             UNION SELECT COALESCE(cash_day,LEFT(at,10)) FROM inv_returns UNION SELECT cash_day FROM sale_voids UNION SELECT cash_day FROM refund_reversals UNION SELECT CAST(? AS nvarchar(10)))
             SELECT days.day,d.opened_at,d.opened_by FROM days LEFT JOIN cash_days d ON days.day=d.day
-            WHERE days.day IS NOT NULL ORDER BY days.day DESC""",(inv.business_day(db),))]
-        result["cash_expenses"]=[dict(r) for r in db.execute("SELECT * FROM cash_expenses ORDER BY day DESC,id DESC")]
+            WHERE days.day IS NOT NULL ORDER BY days.day DESC""",(active_day,))]
+        result["cash_expenses"]=[dict(r,code=inv.public("BL",r["receipt_no"])) for r in
+                                 db.execute("SELECT * FROM cash_expenses ORDER BY day DESC,receipt_no DESC")]
+        result["next_cash_expense_code"]=inv.public("BL",_next_cash_expense_number(db,active_day))
     if receiving:
         for r in db.execute("""SELECT r.id,r.item_id,i.code item_code,i.name item_name,i.unit,i.display_unit,i.display_unit_milli,i.area,i.perishable,r.supplier,r.qty_m,
                 r.approved_m,r.received_m,r.reason,r.created,r.actor,r.reviewed_at,r.reviewer,r.unit_cents,r.version,

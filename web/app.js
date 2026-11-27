@@ -207,7 +207,9 @@ async function run(action,payload,message="Cambios guardados"){
 }
 let route="",authTab="login",setupEmail="";
 function go(key){if(location.hash.slice(1)!==key)location.hash=key;else{route=key;render()}}
-function permitted(){return nav.filter(([k,,,,roles])=>roles.includes(S.user.role)&&(k!=="compras"||S.user.role==="admin"||S.purchases?.length))}
+function permitted(){return nav.filter(([k,,,,roles])=>roles.includes(S.user.role)&&
+  (k!=="compras"||S.user.role==="admin"||S.purchases?.length)&&
+  (k!=="preparacion"||S.user.role==="admin"||S.can_prepare))}
 function displayDate(day,full=false){return new Date(day+"T12:00:00").toLocaleDateString("es-PE",full?{weekday:"long",day:"numeric",month:"long"}:{day:"2-digit",month:"2-digit",year:"numeric"})}
 function render(){
  if(!S.user){renderAuth();return}

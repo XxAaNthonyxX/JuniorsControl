@@ -117,6 +117,7 @@ def copy_tables(source, destination):
             raise ValueError(f"Recuento incorrecto en {name}. Se cancela la migración.")
     destination.execute("""INSERT inv_details(order_id,detail_no,product_id,qty) SELECT order_id,
         ROW_NUMBER() OVER(PARTITION BY order_id ORDER BY product_id),product_id,qty FROM inv_lines""")
+    sqlserver.aplicar_areas_operativas(destination)
     return counts
 
 if __name__ == "__main__":

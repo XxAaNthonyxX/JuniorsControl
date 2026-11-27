@@ -148,6 +148,10 @@ def _aplicar_v22(db):
     register_existing_purchase_expenses(db)
 
 
+def aplicar_areas_operativas(db):
+    db.execute((ROOT/"sql/responsables_area_v24.sql").read_text(encoding="utf8"))
+
+
 def preparar(db):
     if db.execute("SELECT DB_ID()").fetchone()[0] <= 4:
         raise ValueError("Elige una base exclusiva de JuniorsControl.")
@@ -221,6 +225,9 @@ def preparar(db):
             db.execute((ROOT/"sql/pechuga_filetes_v23.sql").read_text(encoding="utf8"))
             version = 23
         if version == 23:
+            aplicar_areas_operativas(db)
+            version = 24
+        if version == 24:
             return
         if version != 2:
             raise ValueError("Versión de esquema incompatible.")
@@ -252,3 +259,4 @@ def preparar(db):
     _aplicar_v21(db)
     _aplicar_v22(db)
     db.execute((ROOT/"sql/pechuga_filetes_v23.sql").read_text(encoding="utf8"))
+    aplicar_areas_operativas(db)

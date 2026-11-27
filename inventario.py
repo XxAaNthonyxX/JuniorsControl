@@ -13,13 +13,22 @@ import porciones
 
 LIMA = timezone(timedelta(hours=-5))
 SYSTEM = {"id": 0, "name": "Sistema", "role": "admin", "area": ""}
-INVENTORY_AREAS = ("Brasas", "Parrillas", "Barra", "Orientales", "Limpieza y Atención")
+PREPARATION_AREAS = ("Brasas", "Parrillas", "Barra", "Orientales")
+INVENTORY_AREAS = (*PREPARATION_AREAS, "Limpieza y Atención")
 PAYMENT_METHODS = ("Efectivo", "Yape", "Tarjeta")
 SMALL_STOCK_UNITS = (
     dict.fromkeys(("kg","kgs","kilo","kilos","kilogramo","kilogramos"),"g")
     | dict.fromkeys(("l","lt","lts","litro","litros"),"mL")
 )
-STAFF_AREAS = ("Cocina", "Barra", "Parrilla", "Limpieza", "Atención", "Horno")
+STAFF_AREAS = (*INVENTORY_AREAS, "Cocina", "Parrilla", "Limpieza", "Atención")
+LEGACY_RESPONSIBLE_AREAS = {
+    "cocina": "Orientales",
+    "oriental": "Orientales",
+    "parrilla": "Parrillas",
+    "horno": "Brasas",
+    "limpieza": "Limpieza y Atención",
+    "atención": "Limpieza y Atención",
+}
 STAFF_INVENTORY_AREAS = {
     "cocina": ("Orientales",),
     "parrilla": ("Brasas", "Parrillas"),
@@ -165,7 +174,17 @@ def _item_area(value):
     raise ValueError("Selecciona un área de insumos del catálogo.")
 
 
+def responsible_area(value):
+    label = (value or "").strip().casefold()
+    if label in LEGACY_RESPONSIBLE_AREAS:
+        return LEGACY_RESPONSIBLE_AREAS[label]
+    return next((area for area in INVENTORY_AREAS if area.casefold() == label), "")
+
+
 def inventory_access_areas(user):
+    if user["role"] == "area":
+        section = responsible_area(_area(user))
+        return (section,) if section else ()
     assigned = _area(user).casefold()
     if assigned in STAFF_INVENTORY_AREAS:
         return STAFF_INVENTORY_AREAS[assigned]
@@ -173,7 +192,9 @@ def inventory_access_areas(user):
 
 
 def _can_prepare(user):
-    return user["role"] in ("admin", "area") or (
+    if user["role"] == "area":
+        return responsible_area(_area(user)) in PREPARATION_AREAS
+    return user["role"] == "admin" or (
         user["role"] == "recepcion" and any(
             area in ("Brasas", "Parrillas", "Orientales") for area in inventory_access_areas(user)
         )
@@ -433,14 +454,7 @@ def _save_product(db, user, p, *, demo=False):
     if not db.execute("SELECT name FROM menu_categories WHERE name=?",(cat,)).fetchone():
         db.execute("INSERT INTO menu_categories(name) VALUES(?)",(cat,))
     price = _scaled(p.get("price"), 100, "Precio", high=100_000_000)
-    category_key = cat.casefold()
-    if category_key == "barra" or "bebid" in category_key:
-        default_area = "Barra"
-    elif "brasa" in category_key or "parrill" in category_key:
-        default_area = "Parrilla"
-    else:
-        default_area = "Cocina"
-    area = _prep_area(p.get("prep_area") or default_area)
+    area = _prep_area(p.get("prep_area") or _default_prep_area(cat))
     recipe = p.get("recipe")
     if not isinstance(recipe,list) or not 1<=len(recipe)<=100:
         raise ValueError("Agrega entre uno y cien insumos a la receta.")
@@ -523,15 +537,27 @@ def _table_number(value):
     return int(raw)
 
 
+def _default_prep_area(category):
+    label = category.casefold()
+    if label == "barra" or "bebid" in label or "coct" in label:
+        return "Barra"
+    if "brasa" in label:
+        return "Brasas"
+    if "parrill" in label:
+        return "Parrillas"
+    return "Orientales"
+
+
 def _prep_area(value):
-    if value not in ("Cocina", "Barra", "Parrilla"):
-        raise ValueError("Selecciona Cocina, Barra o Parrilla para este producto.")
+    if value not in PREPARATION_AREAS:
+        raise ValueError("Selecciona Brasas, Parrillas, Barra u Orientales para este producto.")
     return value
 
 
 def _may_work(user, area):
-    return user["role"] == "admin" or (user["role"] == "area" and
-           (user.get("area") or "").casefold() == area.casefold())
+    return user["role"] == "admin" or (
+        user["role"] == "area" and area in PREPARATION_AREAS and responsible_area(_area(user)) == area
+    )
 
 
 def _pending_cancel(db, order_id):
@@ -1262,8 +1288,11 @@ def _preparation(db,user):
             WHERE o.status='Reservado' AND d.status<>'Cancelado'"""
     params=[]
     if user["role"]=="area":
+        section=responsible_area(_area(user))
+        if section not in PREPARATION_AREAS:
+            return []
         query+=" AND d.area=?"
-        params.append(_area(user))
+        params.append(section)
     query+=" ORDER BY d.sent_at,d.order_id,d.detail_no"
     result=[]
     for r in db.execute(query,params):
@@ -1285,14 +1314,18 @@ def _history(db,user,p,recent=False):
     area=p.get("area")
     restricted=user["role"] not in ("admin","caja","recepcion")
     if restricted:
-        history_areas={name.casefold() for name in (*inventory_access_areas(user),_area(user)) if name}
+        inventory_areas=inventory_access_areas(user)
+        is_responsible=user["role"]=="area"
+        names=inventory_areas if is_responsible else (*inventory_areas,_area(user))
+        history_areas={name.casefold() for name in names if name}
         if area and area.casefold() not in history_areas:
             raise PermissionError("El insumo pertenece a otra área.")
         area_keys=sorted(history_areas) if not area else [area.casefold()]
         if not area_keys:
             return []
         placeholders=",".join("?" for _ in area_keys)
-        area_filter=f"LOWER(c.area) IN ({placeholders})"
+        area_column="i.area" if is_responsible else "c.area"
+        area_filter=f"LOWER({area_column}) IN ({placeholders})"
         conditions.append(area_filter)
         args.extend(area_keys)
     elif area:
@@ -1302,6 +1335,8 @@ def _history(db,user,p,recent=False):
         source_id,_=porciones.resolve(db,_id(p["item_id"]),0)
         item=_item(db,source_id)
         if restricted and item["area"].casefold() not in area_keys:
+            if user["role"]=="area":
+                raise PermissionError("El insumo pertenece a otra área.")
             previous=db.execute("""SELECT 1 FROM inv_move_context c JOIN inv_moves m ON m.id=c.move_id
                                    JOIN inv_lots l ON l.id=m.lot_id WHERE """+area_filter+" AND l.item_id=?",
                                 (*area_keys,item["id"])).fetchone()
@@ -1493,6 +1528,7 @@ def state(db,user,day):
             rules.append(rule)
     result={"items":items,"lots":[r for r in batches(db) if r["item_id"] in allowed],
             "areas":INVENTORY_AREAS if wide else assigned_areas,
+            "preparation_areas":PREPARATION_AREAS,
             "inventory_access_areas":assigned_areas,
             "products":_products(db,balances,all_items) if can_order else [],
             "orders":_orders(db,user,balances),"preparation":_preparation(db,user),"rules":rules,"can_prepare":can_prepare,
@@ -1502,7 +1538,7 @@ def state(db,user,day):
         result["portion_groups"]=[dict(r) for r in db.execute("SELECT * FROM inv_portion_groups")]
         result["next_item_code"]=_next_item_code(db,1+max((i["id"] for i in all_items),default=0))
     if user["role"]=="area":
-        result["area_menu"]=[dict(r) for r in db.execute("SELECT name,category FROM inv_products WHERE prep_area=? ORDER BY category,name",(_area(user),))]
+        result["area_menu"]=[dict(r) for r in db.execute("SELECT name,category FROM inv_products WHERE prep_area=? ORDER BY category,name",(responsible_area(_area(user)),))]
     if can_order:
         result["menu_categories"]=[r[0] for r in db.execute("SELECT name FROM menu_categories UNION SELECT category FROM inv_products ORDER BY 1")]
         result["service_requests"]=_service_requests(db,user)

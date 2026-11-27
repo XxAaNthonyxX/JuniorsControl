@@ -321,10 +321,18 @@ def _check_purchase_version(purchase, payload):
         raise ValueError("La hoja de compra cambió desde que la abriste. Cierra el formulario, actualiza y revisa la cotización.")
 
 
+_OUTSIDE_PURCHASE_AREA = """SELECT 1 FROM g_lines area_line JOIN inv_items area_item ON area_item.id=area_line.item_id
+                            WHERE area_line.purchase_id={purchase} AND area_item.area<>?"""
+
+
 def _edit_purchase(db, user, p):
     purchase = _one(db,"SELECT * FROM g_purchases WHERE id=?",_int(p.get("id"), "compra", 1))
     if user["role"] != "admin" and purchase["assignee_id"] != user["id"]:
         raise PermissionError("Solo administración o el responsable delegado puede editar la compra.")
+    if user["role"] == "area":
+        areas = inv.inventory_access_areas(user)
+        if not areas or db.execute(_OUTSIDE_PURCHASE_AREA.format(purchase="?"), (purchase["id"], areas[0])).fetchone():
+            raise PermissionError("La hoja incluye insumos de otra área.")
     sent=purchase["status"] in ("Enviada","Recibida")
     if not sent and purchase["status"]!="Borrador":
         raise ValueError("Abre la hoja aprobada como borrador para corregirla.")
@@ -772,10 +780,17 @@ def state(db, user):
         if _accessible(user,r["area"]):
             result["alerts"].append(_with_code(r,"AL"))
     query = """SELECT p.*,u.name assignee FROM g_purchases p LEFT JOIN users u ON p.assignee_id=u.id"""
-    args = ()
+    assignee_args = ()
     if not admin:
         query += " WHERE p.assignee_id=?"
-        args = (user["id"],)
+        assignee_args = (user["id"],)
+    args = assignee_args
+    if user["role"] == "area":
+        areas = inv.inventory_access_areas(user)
+        if not areas:
+            return result
+        query += " AND NOT EXISTS (" + _OUTSIDE_PURCHASE_AREA.format(purchase="p.id") + ")"
+        args += (areas[0],)
     purchases = {}
     for r in db.execute(query+" ORDER BY p.id DESC",args):
         purchase = _with_code(r,"OC")
@@ -787,8 +802,10 @@ def state(db, user):
                         FROM g_lines l JOIN inv_items i ON i.id=l.item_id"""
         if not admin:
             line_query += " JOIN g_purchases p ON p.id=l.purchase_id WHERE p.assignee_id=?"
-        for r in db.execute(line_query+" ORDER BY l.id",args):
-            purchase = purchases[r["purchase_id"]]
+        for r in db.execute(line_query+" ORDER BY l.id",assignee_args):
+            purchase = purchases.get(r["purchase_id"])
+            if purchase is None:
+                continue
             line = dict(r)
             line["qty"] = inv.num(line.pop("qty_m"))
             line["total_cents"] = _amount(r["qty_m"],r["unit_cents"])

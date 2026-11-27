@@ -29,7 +29,7 @@ class Stub:
     def __init__(self, order=None, task=None, conflict=None, lines=None, delivered=0, details=None,
                  cancellation_pending=False):
         self.order=order or {'id':1,'status':'Reservado','paid_at':None,'day':inv.today(),'version':1}
-        self.task=task or {'area':'Cocina','status':'En cola'}
+        self.task=task or {'area':'Orientales','status':'En cola'}
         self.task["revision"]=1
         self.conflict=conflict
         self.lines=lines or []
@@ -56,7 +56,7 @@ class Stub:
 
 ADMIN={'id':1,'name':'Admin','role':'admin','area':''}
 WAITER={'id':2,'name':'Mesero','role':'atencion','area':''}
-COOK={'id':3,'name':'Cocinero','role':'area','area':'Cocina'}
+COOK={'id':3,'name':'Cocinero','role':'area','area':'Orientales'}
 BAR={'id':4,'name':'Barra','role':'area','area':'Barra'}
 
 class TestAtencionV4(unittest.TestCase):
@@ -68,12 +68,12 @@ class TestAtencionV4(unittest.TestCase):
         self.assertEqual((1 if inv._table_number(11)<=10 else 2),2)
     def test_roles_are_server_enforced(self):
         self.assertTrue(inv._may_work(ADMIN,'Barra'))
-        self.assertTrue(inv._may_work(COOK,'Cocina'))
+        self.assertTrue(inv._may_work(COOK,'Orientales'))
         self.assertFalse(inv._may_work(COOK,'Barra'))
-        self.assertFalse(inv._may_work(BAR,'Parrilla'))
+        self.assertFalse(inv._may_work(BAR,'Parrillas'))
     def test_valid_areas(self):
-        for area in ['Cocina','Barra','Parrilla']:self.assertEqual(inv._prep_area(area),area)
-        for area in ['Todas','Atención','',None]:
+        for area in ['Brasas','Barra','Parrillas','Orientales']:self.assertEqual(inv._prep_area(area),area)
+        for area in ['Todas','Atención','Horno','',None]:
             with self.assertRaises(ValueError):inv._prep_area(area)
     def test_occupied_same_date_blocks_new_order(self):
         db=Stub(conflict={'number':5})
@@ -88,7 +88,7 @@ class TestAtencionV4(unittest.TestCase):
     def test_direct_delivery_from_each_pending_status(self):
         for status in ("En cola","Preparando","Listo"):
             with self.subTest(status=status):
-                db=Stub(task={"area":"Cocina","status":status})
+                db=Stub(task={"area":"Orientales","status":status})
                 result=inv._advance_preparation(db,COOK,{"id":1,"product_id":8,"detail_no":1,"revision":1,"step":"entregar"})
                 self.assertEqual(result["estado"],"Entregado")
                 update=next(args for sql,args in db.statements if sql.startswith("UPDATE inv_details"))
@@ -134,7 +134,7 @@ class TestAtencionV4(unittest.TestCase):
                   status="Preparando",remove_pending=False,prep_area="Barra")
         removed=dict(sent,detail_no=2,product_id=3,sent_product=3,remove_pending=True)
         delivered=dict(sent,detail_no=3,product_id=4,sent_product=4,status="Entregado")
-        changed=dict(sent,product_id=5,qty=2,prep_area="Cocina")
+        changed=dict(sent,product_id=5,qty=2,prep_area="Orientales")
         lines=[dict(detail_no=1,product_id=5,qty=2),dict(detail_no=3,product_id=4,qty=1)]
         order=dict(id=1,day=inv.today(),status="Reservado",version=1,take_away=False)
         db=Stub(order=order,details=[sent,removed,delivered],lines=[changed,delivered])
@@ -145,7 +145,7 @@ class TestAtencionV4(unittest.TestCase):
         self.assertEqual(reserve.call_args.args[2],{5:2,4:1})
         self.assertTrue(any("SET status='Cancelado'" in sql and args==(1,2) for sql,args in db.statements))
         self.assertEqual([(args[0],args[2],args[3]) for sql,args in db.statements if "SET sent_product=product_id" in sql],
-                         [("Cocina",1,1)])
+                         [("Orientales",1,1)])
 
     def test_confirming_an_edit_cannot_change_a_delivered_detail(self):
         details=[dict(detail_no=1,product_id=6,qty=1,sent_at="2026-11-27",status="Entregado",remove_pending=False)]
@@ -176,7 +176,7 @@ class TestAtencionV4(unittest.TestCase):
                             for sql,args in db.statements))
 
     def test_delivering_before_confirmation_cancels_the_pending_retirement(self):
-        db=Stub(task=dict(area="Cocina",status="Preparando",remove_pending=True))
+        db=Stub(task=dict(area="Orientales",status="Preparando",remove_pending=True))
         inv._advance_preparation(db,COOK,dict(id=1,product_id=6,detail_no=1,revision=1,step="entregar"))
         self.assertTrue(any("SET product_id=sent_product,qty=sent_qty,remove_pending=0" in sql for sql,_ in db.statements))
         delivered=dict(status="Entregado",product_id=6,qty=1,remove_pending=False)

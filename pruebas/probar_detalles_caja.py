@@ -44,7 +44,7 @@ def run():
     act("send")
     rechazado(ValueError,deliver,stale)
     delivered=snapshot()["preparation"][0]
-    assert delivered["product_id"]==1 and delivered["area"]=="Parrilla"
+    assert delivered["product_id"]==1 and delivered["area"]=="Brasas"
     deliver(delivered)
     rechazado(ValueError,lambda: act("save",lines=details(6)))
     act("save",lines=details(1,1))
@@ -102,7 +102,7 @@ def run():
     action(inv,"inv.menu_category",dict(name="Jugos"))
     action(inv,"inv.product",dict(name="Jugo QA",category="Jugos",prep_area="Barra",price=8,recipe=[dict(item_id=1,qty=1)]))
     action(inv,"inv.menu_category",dict(previous="Jugos",name="Jugos naturales"))
-    for area in ("Barra","Cocina","Parrilla"):
+    for area in ("Barra","Brasas","Parrillas","Orientales"):
         with closing(sqlserver.connect()) as db, db:
             scoped=inv.state(db,dict(bar,area=area),inv.today())
         assert not scoped["orders"] and "service_requests" not in scoped

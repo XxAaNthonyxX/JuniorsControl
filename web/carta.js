@@ -320,7 +320,7 @@ function sendToPreparation(o){
  const label=wasSentToPreparation(o)?"Confirmar cambios":"Enviar al área de preparación";
  const rows=pending.map(l=>[
    h("Detalle "+l.detail_no+" · "+l.name),
-   h(l.remove_pending?l.area:productBy(l.product_id)?.prep_area||"Cocina"),h(l.qty),
+   h(l.remove_pending?l.area:productBy(l.product_id)?.prep_area),h(l.qty),
    l.remove_pending?"Retirar":"Enviar",
  ]);
  modal(label+" · "+o.code,`<p>Los cambios se aplicarán a la cola de cada área al confirmar.</p>${table(["Producto","Área","Cantidad","Acción"],rows)}`,

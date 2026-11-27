@@ -9,10 +9,27 @@
   const roleNames = Object.fromEntries(roles);
 
   function assignmentFields(record = {}) {
-    const areas = [...new Set([...(S.staff_areas || []), record.area].filter(Boolean))];
     return select("role", "Rol", roles, record.role || "atencion")
-      + select("area", "Área asignada", [["", "Sin asignar"], ...areas.map(area => [area, area])], record.area || "")
-      + '<p class="muted full">Asigna un área a cada responsable. Para el hornero, elige Recepción y su área de Cocina, Parrilla u Horno. Podrá validar entregas y registrar preparaciones de su área. Para el personal de limpieza, elige Recepción y Limpieza.</p>';
+      + select("area", "Área asignada", [])
+      + '<p data-area-help class="muted full"></p>';
+  }
+
+  function configureAssignment(dialog, record) {
+    const form = dialog.querySelector("form");
+    const role = form.elements.namedItem("role");
+    const area = form.elements.namedItem("area");
+    const help = form.querySelector("[data-area-help]");
+    const update = selected => {
+      const responsible = role.value === "area";
+      const areas = (responsible ? S.areas : S.staff_areas) || [];
+      area.required = responsible;
+      area.replaceChildren(new Option(responsible ? "Selecciona un área" : "Sin asignar", ""),
+        ...areas.map(name => new Option(name, name)));
+      area.value = areas.includes(selected) ? selected : "";
+      help.textContent = responsible ? "El responsable verá los pedidos, insumos y mermas de su área." : "";
+    };
+    role.addEventListener("change", () => update(area.value));
+    update(record.area);
   }
 
   function configureGmail() {
@@ -30,15 +47,18 @@
     const fields = input("email", "Correo de la persona", "email", record.email || "",
       'required maxlength="254" autocomplete="off"') + assignmentFields(record)
       + '<p class="muted full">Junior’s enviará un enlace de activación y un código de 6 dígitos válido por 24 horas. Al reenviar, el código anterior caduca.</p>';
-    modal(record.email ? "Reenviar invitación" : "Invitar a una persona", fields,
+    const dialog = modal(record.email ? "Reenviar invitación" : "Invitar a una persona", fields,
       values => run("invite", values, "Invitación enviada por Gmail."), "Enviar invitación");
+    configureAssignment(dialog, record);
   }
 
   function editPerson(person) {
     const fields = '<p class="full"><strong>' + h(person.name) + '</strong><br><span class="muted">'
       + h(person.email) + '</span></p>' + assignmentFields(person)
       + select("active", "Estado de la cuenta", [["1", "Activa"], ["0", "Desactivada"]], String(Number(person.active)));
-    modal("Editar cuenta", fields, values => run("user_update", { ...values, id: person.id }, "Cuenta actualizada."));
+    const dialog = modal("Editar cuenta", fields,
+      values => run("user_update", { ...values, id: person.id }, "Cuenta actualizada."));
+    configureAssignment(dialog, person);
   }
 
   function deletePerson(person) {

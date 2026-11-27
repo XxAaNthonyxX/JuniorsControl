@@ -13,6 +13,8 @@ import ssl
 import threading
 import time
 
+from inventario import responsible_area
+
 
 ROLES = {"admin", "atencion", "caja", "area", "recepcion"}
 ACTIONS = {"bootstrap_code", "bootstrap", "register", "login", "logout", "invite", "smtp_save", "user_update", "user_delete", "reset_request", "reset_password"}
@@ -64,8 +66,12 @@ def _role_area(payload):
     if not isinstance(area, str) or len(area.strip()) > 80:
         raise ValueError("El área debe tener un máximo de 80 caracteres.")
     area = area.strip()
-    if role == "area" and not area:
-        raise ValueError("Selecciona el área a la que pertenece esta cuenta.")
+    if role == "area":
+        area = responsible_area(area)
+        if not area:
+            raise ValueError("Selecciona el área a la que pertenece esta cuenta.")
+    elif area.casefold() == "horno":
+        area = "Brasas"
     return role, area
 
 

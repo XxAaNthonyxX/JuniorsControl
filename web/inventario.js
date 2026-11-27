@@ -193,7 +193,7 @@
       input('category','Categoría','text',prod.category || '','required list="categorias-carta" maxlength="120"') +
       `<datalist id="categorias-carta">${(S.menu_categories||[]).map(c=>`<option value="${h(c)}"></option>`).join('')}</datalist>` +
       input('price','Precio de venta (S/)','number',prod.price ?? '','min="0.01" step="0.01" required') +
-      select('prep_area','Área responsable de preparación',[["Cocina","Cocina"],["Barra","Barra"],["Parrilla","Parrilla"]],prod.prep_area||"Cocina") +
+      select('prep_area','Área responsable de preparación',[['','Según la categoría'],...asOptions(S.preparation_areas)],prod.prep_area||'') +
       `<div class="full"><strong>Insumos por unidad vendida</strong><div class="actions">${presets}</div><div id="inv-recipe-rows">${(prod.recipe || [{}]).map(recipeRow).join('')}</div>
         <button type="button" class="btn secondary" data-recipe-add>Agregar insumo</button></div>`;
     const dialog=modal(prod.id ? `Editar ${prod.code}` : 'Nuevo producto de carta',fields, values=>{
@@ -219,7 +219,7 @@
   }
   function productPanel() {
     const rows=S.products.map(p=>[
-      `<strong>${h(p.name)}</strong><br><small class="muted">${h(p.code)}</small>`,h(p.category),h(p.prep_area||"Cocina"),cash(p.price),
+      `<strong>${h(p.name)}</strong><br><small class="muted">${h(p.code)}</small>`,h(p.category),h(p.prep_area),cash(p.price),
       (p.recipe || []).map(row=>{const i=itemById(row.item_id); return i ? `${h(i.name)} · ${h(stockQuantity(i,row.qty))}` : '';}).filter(Boolean).join('<br>'),
       fmt(p.available),button('Editar',()=>formProduct(p))
     ]);

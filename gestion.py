@@ -378,6 +378,25 @@ def _report(db, actor, scheduled, stocks=None, at=None):
     return report_id
 
 
+def _configure_alerts(db, user, payload):
+    _require(user, "admin")
+    item = inv._item(db, payload.get("item_id"))
+    minimum = inv._scaled(payload.get("min_qty"), 1000, "Cantidad mínima crítica", 0)
+
+    if "warn_days" in payload:
+        source_id, _ = inv.porciones.resolve(db, item["id"], 0)
+        source = item if source_id == item["id"] else inv._item(db, source_id)
+        if not source["perishable"]:
+            raise ValueError("Selecciona un insumo que requiera vencimiento para configurar el aviso.")
+        days = inv._scaled(payload["warn_days"], 1, "Días de aviso", 0, 3650)
+        db.execute("""UPDATE inv_items SET warn_days=? WHERE id=? OR id IN
+                      (SELECT item_id FROM inv_stock_equivalents WHERE base_id=?)""",
+                   (days, source_id, source_id))
+
+    db.execute("UPDATE inv_items SET min_qty=? WHERE id=?", (minimum, item["id"]))
+    return item["id"]
+
+
 def _alerts(db, stocks):
     now = date.fromisoformat(inv.today())
     by_id = {i["id"]:i for i in stocks}
@@ -414,6 +433,7 @@ def tick(db):
 
 def act(db, user, action, payload):
     handlers = {
+        "gestion.configure_alerts":_configure_alerts,
         "gestion.receipt":_receipt, "gestion.receive":_receive, "gestion.resolve":_resolve,
         "gestion.waste":_waste, "gestion.review_waste":_review_waste,
         "gestion.purchase":_purchase, "gestion.edit_purchase":_edit_purchase,

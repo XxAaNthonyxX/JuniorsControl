@@ -233,6 +233,59 @@
     return stack(budgetCard(S.budget),procurement,reports);
   };
 
+  function configureAlerts() {
+    const fields=select("item_id","Insumo",itemOptions())+
+      input("min_qty","Cantidad mínima crítica","number","","required min=0 max=1000000 step=0.001")+
+      '<div id="alert-expiry-fields">'+
+      input("warn_days","Avisar antes del vencimiento (días)","number","","required min=0 max=3650 step=1")+
+      '</div><p id="alert-expiry-preview" class="muted" aria-live="polite"></p>';
+    const dialog=modal("Configurar alertas",fields,
+      values=>run("gestion.configure_alerts",values,"Alertas del insumo actualizadas"),"Guardar alertas");
+    const form=dialog.querySelector("form");
+    const itemField=form.elements.namedItem("item_id");
+    const minimum=form.elements.namedItem("min_qty");
+    const days=form.elements.namedItem("warn_days");
+    const expiryFields=dialog.querySelector("#alert-expiry-fields");
+    const preview=dialog.querySelector("#alert-expiry-preview");
+
+    function updatePreview() {
+      const selected=item(Number(itemField.value));
+      const source=item(selected.base_id)||selected;
+      if(!source.perishable){
+        preview.textContent="Este insumo se registra sin vencimiento.";
+        return;
+      }
+      const lot=rows("lots").find(l=>l.item_id===source.id&&l.expiry&&l.expiry>=(S.calendar_today||S.today));
+      const shared=source.id!==selected.id?`Se usan los lotes de ${source.name}. `:"";
+      if(!lot){
+        preview.textContent=shared+"El aviso se aplicará cuando ingresen lotes con fecha de vencimiento.";
+        return;
+      }
+      const expiryText=`Próximo vencimiento: ${date(lot.expiry)} (${lot.code}).`;
+      if(!days.value||!days.validity.valid){
+        preview.textContent=shared+expiryText;
+        return;
+      }
+      const alertDate=new Date(lot.expiry+"T00:00:00Z");
+      alertDate.setUTCDate(alertDate.getUTCDate()-Number(days.value));
+      preview.textContent=shared+expiryText+` Aviso desde el ${date(alertDate.toISOString())}.`;
+    }
+
+    function loadSettings() {
+      const selected=item(Number(itemField.value));
+      const source=item(selected.base_id)||selected;
+      minimum.value=selected.min_qty;
+      minimum.closest("label").querySelector("span").textContent=`Cantidad mínima crítica (${selected.unit})`;
+      days.value=source.warn_days;
+      days.disabled=!source.perishable;
+      expiryFields.hidden=days.disabled;
+      updatePreview();
+    }
+    itemField.addEventListener("change",loadSettings);
+    days.addEventListener("input",updatePreview);
+    loadSettings();
+  }
+
   pages.alertas = () => {
     const data=rows("alerts"), active=data.filter(x=>!x.closed);
     return stack(group(metric("Alertas activas",active.length),
@@ -241,6 +294,7 @@
       panel("Seguimiento de alertas",table(["Alerta","Insumo","Detalle","Fecha","Estado"],data.map(x=>[
         e(x.code),e(x.item_name)+sub(x.area),e(x.message),e(when(x.created)),
         badge(x.closed?"Resuelta":"Activa")+(x.closed?sub(when(x.closed)):"")
-      ]),"No se han detectado alertas en tu inventario.")));
+      ]),"No se han detectado alertas en tu inventario."),
+      admin()&&rows("items").length?button("Configurar alertas",configureAlerts,"primary"):""));
   };
 })();

@@ -1,6 +1,6 @@
 /* Existencias y movimientos comparten los controles de formularios de la aplicación. */
 (() => {
-  let tab = 'stock', detail = null, selectedItem = '', area = '', category = '';
+  let tab = 'stock', detail = null, selectedItem = '', area = '';
   let moves = null, historyFilter = {}, owner = null;
   const isAdmin = () => S.user.role === 'admin';
   const itemById = id => S.items.find(item => Number(item.id) === Number(id));
@@ -17,7 +17,7 @@
     if (owner === access) return;
     owner = access;
     tab = 'stock'; detail = null; moves = null; historyFilter = {};
-    selectedItem = ''; area = ''; category = '';
+    selectedItem = ''; area = '';
   }
   function showTab(next) {
     tab = next; detail = null; refreshPanel();
@@ -34,8 +34,12 @@
     const sharesStock=baseId!=null&&S.items.some(other=>other.base_id===baseId);
     return sharesStock?'<p class="muted">El cambio de área se aplica también a las presentaciones que comparten este stock.</p>':'';
   }
+  function itemAreaField(selected) {
+    return `<label class="field"><span>Área responsable</span><select name="area" required>
+      ${option('','Seleccionar área',selected||'')}${S.areas.map(name=>option(name,name,selected)).join('')}
+    </select></label>`;
+  }
   function formItem(i = {}) {
-    const lists = `<datalist id="inv-categories">${S.categories.map(v=>option(v,v,'')).join('')}</datalist>`;
     const suggested=i.code||S.next_item_code;
     const rule=S.rules.find(r=>Number(r.source_id)===Number(i.id));
     const ruleTarget=itemById(rule?.target_id);
@@ -43,11 +47,7 @@
     const fields = `<div class="field"><span id="item-code-label">Código del insumo</span><output aria-labelledby="item-code-label" class="notice">${h(suggested)}</output></div>` +
       input('name','Nombre del insumo','text',i.name || '','required maxlength="100"') +
       input('unit',i.id?'Unidad de referencia':'Unidad de medida','text',i.unit || '',i.id?'readonly':'required maxlength="20" placeholder="kg, L, und…"') +
-      `<label class="field"><span>Área responsable</span><select name="area" required>
-        ${option('','Seleccionar área',i.area||'')}${S.areas.map(name=>option(name,name,i.area)).join('')}
-      </select></label>` +
-      sharedAreaNotice(i) +
-      input('category','Categoría','text',i.category || '','required maxlength="60" list="inv-categories"') +
+      itemAreaField(i.area) + sharedAreaNotice(i) +
       input('min_qty','Cantidad mínima','number',stockInputValue(i.name,i.unit,i.min_qty ?? 0,i),'required min="0"') +
       input('warn_days','Avisar días antes de vencer','number',i.warn_days ?? 3,'required min="0" max="3650" step="1"') +
       select('perishable','¿Requiere vencimiento?',yesNo,i.perishable ?? 1) +
@@ -60,7 +60,7 @@
       '<div id="inv-transform-now" class="stack" hidden>' +
       input('transform_qty','Número de preparaciones a ejecutar','number',1,'min="1" max="10000" step="1" required') +
       input('transform_expiry','Vencimiento del producto resultante','date','','') +
-      '<p id="inv-transform-summary" class="notice" aria-live="polite"></p></div>' + lists;
+      '<p id="inv-transform-summary" class="notice" aria-live="polite"></p></div>';
     const dialog=modal(i.id ? `Editar ${i.code}` : 'Nuevo insumo',fields,
       async values=>{
         if(i.id)values.id=i.id;
@@ -107,19 +107,9 @@
     form.addEventListener('change',update);
     update();
   }
-  function formItemClassification(i) {
-    const fields=select('category','Categoría',asOptions(S.categories),i.category)+
-      input('new_category','Nueva categoría (opcional)','text','','maxlength="60"')+
-      select('area','Área responsable',asOptions(S.areas),i.area)+
-      sharedAreaNotice(i);
-    modal(`Cambiar categoría o área · ${i.code} · ${i.name}`,fields,values=>{
-      const category=values.new_category.trim()||values.category;
-      const area=values.area;
-      const changes={id:i.id};
-      if(category!==i.category)changes.category=category;
-      if(area!==i.area)changes.area=area;
-      return run('inv.item_category',changes,'Insumo actualizado');
-    });
+  function formItemArea(i) {
+    modal(`Cambiar área · ${i.code} · ${i.name}`,itemAreaField(i.area)+sharedAreaNotice(i),values=>
+      run('inv.item_area',{id:i.id,area:values.area},'Área actualizada'));
   }
   function formItemUnit(i) {
     const measure=stockMeasure(i.name,i.unit,i);
@@ -152,24 +142,22 @@
       table(['Lote','Vencimiento','Reservado','Disponible'],lotRows,'Este insumo aún no tiene lotes con existencias.'),actions);
   }
   function stockTable() {
-    const rows = S.items.filter(i=>(!area || i.area===area) && (!category || i.category===category) &&
+    const rows = S.items.filter(i=>(!area || i.area===area) &&
       (!selectedItem || String(i.id)===selectedItem)).map(i=>[
-        h(i.code),`<strong>${h(i.name)}</strong><br><small class="muted">${h(i.category)}${i.base_id?` · ${i.factor} cuartos por unidad<br>Stock compartido con ${h(i.base_code)} · ${fmt(i.available_portions)} cuartos disponibles`:""}</small>`,
+        h(i.code),`<strong>${h(i.name)}</strong>${i.base_id?`<small class="sub">${i.factor} cuartos por unidad<br>Stock compartido con ${h(i.base_code)} · ${fmt(i.available_portions)} cuartos disponibles</small>`:""}`,
         h(i.area),h(i.base_id?formatStockQuantity('Pollo cocido','cuartos',i.reserved*i.factor):stockQuantity(i,i.reserved)),
         `<strong>${h(stockQuantity(i,i.available))}</strong>`,
         badge(stockUsableValue(i.name,i.unit,i.available,i)===0 ? 'Agotado' : i.available<=i.min_qty ? 'Stock bajo' : 'Disponible'),
-        (isAdmin()?button('Editar',()=>formItem(i),'secondary')+button('Cambiar categoría o área',()=>formItemClassification(i),'secondary')+
+        (isAdmin()?button('Editar',()=>formItem(i),'secondary')+button('Cambiar área',()=>formItemArea(i),'secondary')+
           button('Cambiar unidad',()=>formItemUnit(i),'secondary'):'')+button('Ver lotes',()=>{ detail=i.id; refreshPanel(); document.getElementById('inventory-detail')?.scrollIntoView({block:'nearest'}); })
       ]);
     return table(['Código','Insumo','Área','Reservado','Disponible','Estado','Acciones'],rows,'No hay insumos que coincidan con los filtros.');
   }
   function stockPanel() {
     if(!S.areas.includes(area))area='';
-    if(!S.categories.includes(category))category='';
     const filter = `<div class="actions" style="flex-wrap:wrap;margin-bottom:16px">
       <label class="field">Buscar insumo<select id="inv-search">${option('','Todos los insumos',selectedItem)}${S.items.map(i=>option(i.id,`${i.code} · ${i.name}`,selectedItem)).join('')}</select></label>
       <label class="field">Área<select id="inv-area">${option('','Todas las áreas',area)}${S.areas.map(v=>option(v,v,area)).join('')}</select></label>
-      <label class="field">Categoría<select id="inv-category">${option('','Todas las categorías',category)}${S.categories.map(v=>option(v,v,category)).join('')}</select></label>
       </div>`;
     const selected = detail != null && itemById(detail);
     const metrics = `<div class="metrics">${metric(S.items.length,'Insumos en catálogo')}${metric(S.items.filter(i=>i.available<=i.min_qty).length,'En mínimo o agotados')}${metric(S.lots.length,'Lotes con existencias')}</div>`;
@@ -354,10 +342,9 @@
     if(e.target.closest('[data-recipe-remove]')) e.target.closest('[data-recipe-line]')?.remove();
   });
   document.addEventListener('change',e=>{
-    if(!['inv-search','inv-area','inv-category'].includes(e.target.id)) return;
+    if(!['inv-search','inv-area'].includes(e.target.id)) return;
     if(e.target.id==='inv-search') selectedItem=e.target.value;
-    else if(e.target.id==='inv-area') area=e.target.value;
-    else category=e.target.value;
+    else area=e.target.value;
     document.getElementById('inv-results').innerHTML=stockTable();
     prune();
   });

@@ -7,6 +7,38 @@ import inventario as inv
 
 
 class TestUnidadesDeInsumo(TestCase):
+    def test_registrar_y_editar_insumo_sin_categoria(self):
+        values={"name":"Inca cola (600ml)","area":"barra","unit":"unidad","min_qty":15,"warn_days":10,
+                "perishable":True,"transformable":False}
+        db=Mock()
+        db.execute.return_value.fetchone.return_value=(14,)
+        with patch.object(inv,"_next_item_code",return_value="INS0014"):
+            self.assertEqual(inv.act(db,ADMIN,"inv.item",values),{"id":14,"code":"INS0014"})
+        query,args=db.execute.call_args.args
+        self.assertIn("N''",query)
+        self.assertEqual(query.count("?"),len(args))
+        self.assertEqual(args,(14,"INS0014","Inca cola (600ml)","Barra","unidad",15000,10,True,False))
+
+        db=Mock()
+        db.execute.return_value.fetchone.return_value=None
+        legacy={"id":14,"code":"INS0014","category":"Bebidas","area":"Barra","unit":"unidad",
+                "min_qty":15000,"perishable":True}
+        with patch.object(inv,"_item",return_value=legacy):
+            inv.act(db,ADMIN,"inv.item",dict(values,id=14,name="Inca cola personal"))
+        query,args=db.execute.call_args.args
+        self.assertNotIn("category",query)
+        self.assertEqual(args[:3],("INS0014","Inca cola personal","unidad"))
+
+    def test_cambiar_area_reasigna_las_presentaciones_con_stock_compartido(self):
+        db=Mock()
+        item={"id":14,"area":"Brasas"}
+        with patch.object(inv,"_item",return_value=item),patch.object(inv.porciones,"resolve",return_value=(2,0)):
+            result=inv.act(db,ADMIN,"inv.item_area",{"id":14,"area":"Parrillas"})
+            self.assertEqual(result,{"id":14,"area":"Parrillas"})
+            self.assertEqual(db.execute.call_args.args[1],("Parrillas",2,2))
+            with self.assertRaisesRegex(ValueError,"área de insumos del catálogo"):
+                inv.act(db,ADMIN,"inv.item_area",{"id":14,"area":"Bebidas"})
+
     def test_bistec_y_arroz_por_unidades_enteras(self):
         for name, label, size in (("Bistec de res","filetes",280), ("Arroz cocido","porciones",500)):
             item = {"display_unit":label, "display_unit_milli":size}

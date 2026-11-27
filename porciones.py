@@ -48,7 +48,7 @@ def setup(db,user,p):
     if not existing:
         db.execute("INSERT inv_portion_groups(base_id,raw_id,potato_id) VALUES(?,?,?)",(base["id"],raw["id"],potato["id"]))
         for factor,name in ((2,"Medio pollo cocido"),(4,"Pollo entero cocido")):
-            item=inv._save_item(db,user,dict(name=name,category=base["category"],area=base["area"],unit="und",
+            item=inv._save_item(db,user,dict(name=name,area=base["area"],unit="und",
                 perishable=base["perishable"],warn_days=base["warn_days"],min_qty=0))
             db.execute("INSERT inv_stock_equivalents(item_id,base_id,factor) VALUES(?,?,?)",(item["id"],base["id"],factor))
     whole=db.execute("SELECT item_id FROM inv_stock_equivalents WHERE base_id=? AND factor=4",(base["id"],)).fetchone()[0]

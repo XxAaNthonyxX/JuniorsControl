@@ -283,9 +283,13 @@ def expire(db):
 
 def stock(db):
     result = []
-    rows = db.execute("""SELECT i.*,COALESCE(SUM(l.physical),0) AS physical,COALESCE(SUM(l.reserved),0) AS reserved,
+    rows = db.execute("""SELECT i.id,i.code,i.name,i.area,i.unit,i.min_qty,i.warn_days,i.perishable,i.transformable,
+                         i.display_unit,i.display_unit_milli,
+                         COALESCE(SUM(l.physical),0) AS physical,COALESCE(SUM(l.reserved),0) AS reserved,
                          COALESCE(SUM(CASE WHEN l.expiry IS NULL OR l.expiry>=? THEN l.physical-l.reserved ELSE 0 END),0) AS available
-                         FROM inv_items i LEFT JOIN inv_lots l ON l.item_id=i.id GROUP BY i.id,i.code,i.name,i.category,i.area,i.unit,i.min_qty,i.warn_days,i.perishable,i.transformable,i.display_unit,i.display_unit_milli ORDER BY i.name""",
+                         FROM inv_items i LEFT JOIN inv_lots l ON l.item_id=i.id
+                         GROUP BY i.id,i.code,i.name,i.area,i.unit,i.min_qty,i.warn_days,i.perishable,i.transformable,
+                                  i.display_unit,i.display_unit_milli ORDER BY i.name""",
                       (today(),))
     for row in rows:
         item = dict(row)
@@ -331,15 +335,17 @@ def _set_item_area(db, item, area):
 
 def _save_item(db, user, p):
     _role(user, "admin")
-    fields = [_text(p.get("name"),"nombre",100), _text(p.get("category"),"categoría",60),
-              _item_area(p.get("area")), _text(p.get("unit"),"unidad",20)]
+    name=_text(p.get("name"),"nombre",100)
+    area=_item_area(p.get("area"))
+    unit=_text(p.get("unit"),"unidad",20)
     item=_item(db,p["id"]) if p.get("id") else None
-    fields += [item_quantity(fields[0],p.get("min_qty",0),"Stock mínimo",unit=fields[3],minimum=0,item=item,
-                            previous=item["min_qty"] if item else None),
-               _scaled(p.get("warn_days",3),1,"Días de aviso",0,3650),
-               _bool(p.get("perishable")), _bool(p.get("transformable"))]
+    min_qty=item_quantity(name,p.get("min_qty",0),"Stock mínimo",unit=unit,minimum=0,item=item,
+                          previous=item["min_qty"] if item else None)
+    warn_days=_scaled(p.get("warn_days",3),1,"Días de aviso",0,3650)
+    perishable=_bool(p.get("perishable"))
+    transformable=_bool(p.get("transformable"))
     if item and db.execute("SELECT 1 FROM inv_stock_equivalents WHERE item_id=? OR base_id=?",(item["id"],item["id"])).fetchone():
-        if (fields[3],fields[6])!=(item["unit"],item["perishable"]):
+        if (unit,perishable)!=(item["unit"],item["perishable"]):
             raise ValueError("El stock compartido debe conservar su unidad y tipo de vencimiento.")
     code=p.get("code")
     if code:
@@ -351,23 +357,23 @@ def _save_item(db, user, p):
         if db.execute("SELECT 1 FROM inv_items WHERE code=? AND id<>?",(code,item["id"] if item else 0)).fetchone():
             raise ValueError("Ya existe un insumo con ese código.")
     if item:
-        if fields[3]!=item["unit"] and quantity_measure(item)[1]:
+        if unit!=item["unit"] and quantity_measure(item)[1]:
             raise ValueError("Cambia la presentación desde Cambiar unidad.")
-        if (fields[3] != item["unit"] or fields[6] != item["perishable"]) and db.execute(
+        if (unit != item["unit"] or perishable != item["perishable"]) and db.execute(
             "SELECT 1 FROM inv_lots WHERE item_id=? UNION SELECT 1 FROM inv_recipes WHERE item_id=? UNION SELECT 1 FROM inv_rules WHERE source_id=? OR target_id=?",
             (item["id"],)*4).fetchone():
             raise ValueError("El insumo tiene lotes o recetas. Conserva su unidad y tipo de vencimiento.")
         code=code or item["code"]
-        name, category, area, unit, min_qty, warn_days, perishable, transformable = fields
-        db.execute("UPDATE inv_items SET code=?,name=?,category=?,unit=?,min_qty=?,warn_days=?,perishable=?,transformable=? WHERE id=?",
-                   (code, name, category, unit, min_qty, warn_days, perishable, transformable, item["id"]))
+        db.execute("UPDATE inv_items SET code=?,name=?,unit=?,min_qty=?,warn_days=?,perishable=?,transformable=? WHERE id=?",
+                   (code,name,unit,min_qty,warn_days,perishable,transformable,item["id"]))
         _set_item_area(db, item, area)
         saved_id=item["id"]
     else:
         saved_id=db.execute("SELECT COALESCE(MAX(id),0)+1 FROM inv_items").fetchone()[0]
         code=code or _next_item_code(db,saved_id)
+        # La columna histórica de SQL Server sigue siendo obligatoria.
         db.execute("""INSERT INTO inv_items(id,code,name,category,area,unit,min_qty,warn_days,perishable,transformable)
-                      VALUES(?,?,?,?,?,?,?,?,?,?)""", (saved_id,code,*fields))
+                      VALUES(?,?,?,N'',?,?,?,?,?,?)""",(saved_id,code,name,area,unit,min_qty,warn_days,perishable,transformable))
     transform_now=_bool(p.get("transform_now",False))
     if transform_now and not p.get("target_id"):
         raise ValueError("Selecciona el producto resultante antes de transformar.")
@@ -382,15 +388,12 @@ def _save_item(db, user, p):
     return result
 
 
-def _item_category(db,user,p):
+def _change_item_area(db,user,p):
     _role(user,"admin")
     item=_item(db,p.get("id"))
-    category=_text(p["category"],"categoría",60) if "category" in p else item["category"]
-    area=_item_area(p["area"]) if "area" in p else item["area"]
-    if category != item["category"]:
-        db.execute("UPDATE inv_items SET category=? WHERE id=?",(category,item["id"]))
+    area=_item_area(p.get("area"))
     _set_item_area(db, item, area)
-    return {"id":item["id"],"category":category,"area":area}
+    return {"id":item["id"],"area":area}
 
 
 def _configure_item_unit(db,user,p):
@@ -1490,7 +1493,7 @@ def state(db,user,day):
             rules.append(rule)
     result={"items":items,"lots":[r for r in batches(db) if r["item_id"] in allowed],
             "areas":INVENTORY_AREAS if wide else assigned_areas,
-            "inventory_access_areas":assigned_areas,"categories":sorted({i["category"] for i in items}),
+            "inventory_access_areas":assigned_areas,
             "products":_products(db,balances,all_items) if can_order else [],
             "orders":_orders(db,user,balances),"preparation":_preparation(db,user),"rules":rules,"can_prepare":can_prepare,
             "movements":_history(db,user,{},recent=True)}
@@ -1661,7 +1664,8 @@ def act(db,user,action,payload):
     if not isinstance(payload,dict):
         raise ValueError("Los datos de la operación son inválidos.")
     routes={"inv.portions":porciones.setup,"pedidos.void_sale":_void_sale,"pedidos.undo_request":_undo_request,"inv.menu_category":_menu_category,"pedidos.request_refund":_request_refund,"pedidos.resolve_refund":_resolve_refund,
-            "inv.item":_save_item,"inv.item_category":_item_category,"inv.item_unit":_configure_item_unit,
+            "inv.item":_save_item,"inv.item_area":_change_item_area,"inv.item_category":_change_item_area,
+            "inv.item_unit":_configure_item_unit,
             "inv.product":_save_product,"inv.rule":_rule,"inv.transform":_transform,
             "pedidos.save":_save_order,"pedidos.cancel":_cancel,"pedidos.pay":_pay,"pedidos.refund":_refund,
             "pedidos.refund_order":_refund_order,
@@ -1697,24 +1701,24 @@ def init(db,demo=True):
         db.execute("INSERT INTO inv_seed VALUES(1)")
         return
     # Datos ficticios de apertura. La fecha se fija una vez en la primera instalación.
-    # código, nombre, área, familia, unidad, mínimo, aviso, vida inicial, transformable, cantidad
+    # código, nombre, área, unidad, mínimo, aviso, vida inicial, transformable, cantidad
     sample=[
-        ("POL-01","Pollo entero crudo","Brasas","Aves","und",6,2,5,1,18),
-        ("POL-02","Cuarto de pollo asado","Brasas","Preparados","porc",10,1,2,0,36),
-        ("PAP-01","Papa para freír","Orientales","Verduras","kg",8,3,12,0,32),
-        ("ENS-01","Ensalada de la casa","Orientales","Preparados","porc",8,1,2,0,40),
-        ("RES-01","Bistec de res","Parrillas","Carnes","kg",3,2,5,0,9),
-        ("ARR-01","Arroz cocido","Orientales","Preparados","kg",4,1,2,0,12),
-        ("POL-03","Pollo trozado","Orientales","Aves","kg",3,2,3,0,8),
-        ("BEB-01","Chicha morada preparada","Barra","Bebidas","L",3,1,3,0,15),
-        ("BEB-02","Gaseosa personal sellada","Barra","Bebidas","bot",12,10,90,0,10),
-        ("LIM-01","Detergente lavavajillas","Limpieza y Atención","Limpieza","L",2,0,None,0,6),
-        ("ATE-01","Servilletas","Limpieza y Atención","Servicio","und",100,0,None,0,500),
+        ("POL-01","Pollo entero crudo","Brasas","und",6,2,5,1,18),
+        ("POL-02","Cuarto de pollo asado","Brasas","porc",10,1,2,0,36),
+        ("PAP-01","Papa para freír","Orientales","kg",8,3,12,0,32),
+        ("ENS-01","Ensalada de la casa","Orientales","porc",8,1,2,0,40),
+        ("RES-01","Bistec de res","Parrillas","kg",3,2,5,0,9),
+        ("ARR-01","Arroz cocido","Orientales","kg",4,1,2,0,12),
+        ("POL-03","Pollo trozado","Orientales","kg",3,2,3,0,8),
+        ("BEB-01","Chicha morada preparada","Barra","L",3,1,3,0,15),
+        ("BEB-02","Gaseosa personal sellada","Barra","bot",12,10,90,0,10),
+        ("LIM-01","Detergente lavavajillas","Limpieza y Atención","L",2,0,None,0,6),
+        ("ATE-01","Servilletas","Limpieza y Atención","und",100,0,None,0,500),
     ]
     first_day=date.fromisoformat(today())
     ids={}
-    for code,name,area,cat,unit,minimum,warn,life,transformable,opening in sample:
-        item=_save_item(db,SYSTEM,{"name":name,"area":area,"category":cat,"unit":unit,
+    for code,name,area,unit,minimum,warn,life,transformable,opening in sample:
+        item=_save_item(db,SYSTEM,{"name":name,"area":area,"unit":unit,
                         "min_qty":minimum,"warn_days":warn,"perishable":life is not None,"transformable":transformable})["id"]
         ids[code]=item
         expiry=(first_day+timedelta(days=life)).isoformat() if life is not None else None

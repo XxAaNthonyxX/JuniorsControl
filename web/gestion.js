@@ -147,15 +147,19 @@
 
   function newWaste() {
     const assigned=S.inventory_access_areas;
-    const lots=rows("lots").filter(x=>{
-      const i=item(x.item_id);
-      return i && stockInputValue(i.name,i.unit,x.available,i)>=itemQuantityStep(i.name,i) && (admin() || assigned.includes(i.area));
-    });
-    if(!lots.length){
+    const availableItems=new Map(rows("items").filter(i=>admin() || assigned.includes(i.area)).map(i=>[i.id,i]));
+    const stockLots=new Map();
+    for(const lot of rows("lots")){
+      const i=availableItems.get(lot.item_id);
+      if(!i||stockUsableValue(i.name,i.unit,lot.available,i)<=0)continue;
+      if(!stockLots.has(i.id))stockLots.set(i.id,[]);
+      stockLots.get(i.id).push(lot);
+    }
+    if(!stockLots.size){
       toast("No hay lotes con existencias disponibles para reportar una merma.",true);
       return;
     }
-    const options=lots.map(x=>[x.id,`${label("LT",x.id)} · ${item(x.item_id).name} · ${qtyText(item(x.item_id),x.available)} disponibles`]);
+    const options=[...availableItems.values()].filter(i=>stockLots.has(i.id)).map(i=>[i.id,`${i.code} · ${i.name}`]);
     const calendarToday=S.calendar_today||S.today;
     const activeDay=S.today;
     const latestDate=calendarToday>activeDay?calendarToday:activeDay;
@@ -163,15 +167,16 @@
       dateField.value=calendarToday;
       dateField.setCustomValidity("");
     },"link"):"";
-    const dialog=modal("Reportar merma",select("lot","Lote afectado",options)+
+    const dialog=modal("Reportar merma",select("item_id","Insumo afectado",[["","Selecciona un insumo"],...options])+
+      select("lot","Lote afectado",[])+
       input("qty","Cantidad afectada","number","",qtyAttrs)+
       input("occurred_on","Fecha de la merma","date",activeDay,'required max="'+e(latestDate)+'"')+todayButton+
       input("reason","Motivo y detalle del descarte","text","","required maxlength=500")+
       note("La cantidad quedará reservada hasta que Administración revise la solicitud."),
       v=>{
-        const lot=lots.find(x=>x.id===Number(v.lot));
+        const selected=item(Number(v.item_id));
+        const lot=stockLots.get(selected?.id)?.find(x=>x.id===Number(v.lot));
         if (!lot) throw Error("Selecciona un lote con existencias.");
-        const selected=item(lot.item_id);
         const qty=stockQuantityPayload(selected.name,selected.unit,v.qty,selected);
         return run("gestion.waste",{item_id:lot.item_id,lot_id:lot.id,qty,occurred_on:v.occurred_on,reason:v.reason},"Merma reportada");
       },"Enviar a revisión");
@@ -181,24 +186,48 @@
       const future=dateField.value>calendarToday&&dateField.value!==activeDay;
       dateField.setCustomValidity(future?"Selecciona hoy, una fecha anterior o la fecha de la jornada activa.":"");
     });
+    const itemField=form.elements.namedItem("item_id");
     const lotField=form.elements.namedItem("lot");
     const quantityField=form.elements.namedItem("qty");
+    const quantityLabel=quantityField.closest("label").querySelector("span");
+    itemField.required=lotField.required=true;
     const updateLimit=()=>{
-      const lot=lots.find(x=>x.id===Number(lotField.value));
-      const selected=item(lot.item_id);
+      const selected=item(Number(itemField.value));
+      const lot=stockLots.get(selected?.id)?.find(x=>x.id===Number(lotField.value));
+      quantityField.value="";
+      quantityField.disabled=!lot;
+      if(!lot){
+        quantityLabel.textContent="Cantidad afectada";
+        return;
+      }
       quantityField.max=stockUsableValue(selected.name,selected.unit,lot.available,selected);
-      quantityField.closest("label").querySelector("span").textContent=
-        `Cantidad afectada (${stockMeasure(selected.name,selected.unit,selected).unit})`;
+      quantityLabel.textContent=`Cantidad afectada (${stockMeasure(selected.name,selected.unit,selected).unit})`;
       setItemQuantityStep(quantityField,selected.name,false,null,selected);
     };
+    const updateLots=()=>{
+      const selected=item(Number(itemField.value));
+      const lots=stockLots.get(selected?.id)||[];
+      lotField.disabled=!lots.length;
+      lotField.replaceChildren(new Option(lots.length?"Selecciona un lote":"Selecciona primero un insumo",""),...lots.map(lot=>
+        new Option(`${lot.code} · ${qtyText(selected,lot.available)} disponibles · ${lot.expiry?"Vence "+date(lot.expiry):"Sin vencimiento"}`,lot.id)));
+      updateLimit();
+    };
+    itemField.addEventListener("change",updateLots);
     lotField.addEventListener("change",updateLimit);
-    updateLimit();
+    updateLots();
+  }
+
+  function wasteQuantity(waste) {
+    const size=waste.display_unit_milli;
+    const measure=size&&Math.round(waste.qty*1000)%size?{...waste,display_unit_milli:null}:waste;
+    return qtyText(measure,waste.qty);
   }
 
   function reviewWaste(x,approve) {
     const verb=approve?"Aprobar":"Rechazar";
-    const effect=approve?"Se descontará la cantidad de la merma.":"Las reservas de esta merma se liberarán.";
-    confirmAction(verb+" "+x.code,qtyText(x,x.qty)+" de "+x.item_name+". "+x.reason+". "+effect,
+    const effect=approve?"Se registrará la salida de la cantidad reservada.":"La cantidad reservada se liberará.";
+    const lot=x.lot_id?" del lote "+label("LT",x.lot_id):"";
+    confirmAction(verb+" "+x.code,wasteQuantity(x)+" de "+x.item_name+lot+". "+x.reason+". "+effect,
       "review_waste",{id:x.id,approve},verb,approve?"Merma aprobada":"Merma rechazada");
   }
 
@@ -206,7 +235,7 @@
     const data=rows("wastes");
     return panel("Reportes de merma",table(["Reporte","Lote e insumo","Cantidad","Motivo","Estado",""],data.map(x=>[
       e(x.code)+sub(date(x.occurred_on||x.created))+sub("Registro: "+when(x.created)),e(x.item_name)+sub(x.lot_id?label("LT",x.lot_id):x.area),
-      e(qtyText(x,x.qty)),e(x.reason)+sub(x.actor),badge(x.status),
+      e(wasteQuantity(x)),e(x.reason)+sub(x.actor),badge(x.status),
       admin()&&x.status==="Pendiente"?actions(button("Aprobar",()=>reviewWaste(x,true)),button("Rechazar",()=>reviewWaste(x,false))):muted(x.reviewer)
     ]),"Aún no se han reportado mermas."),button("Reportar merma",newWaste,"primary"));
   };

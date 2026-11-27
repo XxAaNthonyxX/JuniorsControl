@@ -209,9 +209,11 @@ def _waste(db, user, p):
     item = _item(db, p.get("item_id"))
     if not _waste_accessible(user, item["area"]):
         raise PermissionError("El insumo pertenece a otra área.")
+    if p.get("lot_id") in (None,""):
+        raise ValueError("Selecciona el lote afectado.")
+    lot_id = _int(p["lot_id"], "lote", 1)
     amount=inv.item_quantity(item["name"],p.get("qty"),unit=item["unit"],item=item)
     source_id,quantity=inv.porciones.resolve(db,item["id"],amount)
-    lot_id = _int(p["lot_id"], "lote", 1) if p.get("lot_id") not in (None,"") else None
     reason = _text(p.get("reason"), "motivo de la merma", 500)
     at = stamp()
     calendar_today = at[:10]

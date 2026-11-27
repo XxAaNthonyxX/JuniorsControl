@@ -216,8 +216,11 @@ def preparar(db):
             version = 21
         if version == 21:
             _aplicar_v22(db)
-            return
+            version = 22
         if version == 22:
+            db.execute((ROOT/"sql/pechuga_filetes_v23.sql").read_text(encoding="utf8"))
+            version = 23
+        if version == 23:
             return
         if version != 2:
             raise ValueError("Versión de esquema incompatible.")
@@ -248,3 +251,4 @@ def preparar(db):
     db.execute((ROOT/"sql/envio_lotes_v20.sql").read_text(encoding="utf8"))
     _aplicar_v21(db)
     _aplicar_v22(db)
+    db.execute((ROOT/"sql/pechuga_filetes_v23.sql").read_text(encoding="utf8"))

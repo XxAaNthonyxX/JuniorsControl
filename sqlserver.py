@@ -192,8 +192,11 @@ def preparar(db):
             version = 17
         if version == 17:
             db.execute((ROOT/"sql/retirar_detalles_v18.sql").read_text(encoding="utf8"))
-            return
+            version = 18
         if version == 18:
+            db.execute((ROOT/"sql/anular_cobradas_v19.sql").read_text(encoding="utf8"))
+            return
+        if version == 19:
             return
         if version != 2:
             raise ValueError("Versión de esquema incompatible.")
@@ -220,3 +223,4 @@ def preparar(db):
     db.execute((ROOT/"sql/lotes_compras_v16.sql").read_text(encoding="utf8"))
     _aplicar_v17(db)
     db.execute((ROOT/"sql/retirar_detalles_v18.sql").read_text(encoding="utf8"))
+    db.execute((ROOT/"sql/anular_cobradas_v19.sql").read_text(encoding="utf8"))

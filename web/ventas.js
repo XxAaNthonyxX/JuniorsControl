@@ -82,9 +82,12 @@ function ventasPeriodo(orders,start,end){
    return panel("Jornada activa · "+displayDate(S.today),table(["Fecha","Estado","Comandas","Registrada por","Fecha de registro","Acciones"],rows),
      button("Abrir fecha",()=>openDay(),"primary"));
  };
- function refundButton(o){
-   return o?.status==="Cobrado"&&o.details.some(d=>d.refundable_qty>0)?
+ function saleActions(o){
+   if(!o)return "";
+   if(o.cancel_request)return '<small class="muted">Anulación solicitada</small>';
+   const refund=o.status==="Cobrado"&&o.details.some(d=>d.refundable_qty>0)?
      button("Gestionar devolución",()=>refundOrder(o),"secondary"):"";
+   return refund+(canRequestCancel(o)?button("Solicitar anulación",()=>requestCancel(o),"secondary"):"");
  }
  function collectionPanel(){
    const orders=S.orders.filter(o=>o.day===S.today&&["Reservado","Por revisar"].includes(o.status)&&!o.cancel_request&&o.details.some(d=>d.status==="Entregado"));
@@ -104,7 +107,7 @@ function ventasPeriodo(orders,start,end){
    const records=r.entries.map(e=>[
       `<b>${h(e.code)}</b><small class="sub">${h(e.kind)}</small>${e.payments?.length?`<small class="sub">${h(formatPayments(e.payments))}</small>`:""}`,
       h(e.at),`<b>${h(e.order)}</b><small class="sub">${h(displayDate(e.day))}</small>`,
-      h(e.mesa),h(e.who),money(e.amount),button("Ver detalle de comanda",()=>details(S.orders.find(o=>o.id===e.id),true),"link")+(e.kind==="Cobro"?refundButton(S.orders.find(o=>o.id===e.id)):"")]);
+      h(e.mesa),h(e.who),money(e.amount),button("Ver detalle de comanda",()=>details(S.orders.find(o=>o.id===e.id),true),"link")+(e.kind==="Cobro"?saleActions(S.orders.find(o=>o.id===e.id)):"")]);
    const products=r.products.map(p=>[h(p.name),fmt(p.sold),fmt(p.returned),money(p.amount)]);
    const filters=`<form id="ventas-filtro" class="actions filters">${input("desde","Desde","date",from,"required")}${input("hasta","Hasta","date",to,"required")}<button class="btn primary">Consultar</button></form>`;
    const expenses=(S.cash_expenses||[]).filter(e=>e.day>=from&&e.day<=to);

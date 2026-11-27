@@ -332,41 +332,56 @@ function sendToPreparation(o){
 function canCancelOrder(o){
  return !o.cancel_request&&["Reservado","Por revisar"].includes(o.status)&&!o.details.some(d=>d.status==="Entregado");
 }
+function canRequestCancel(o){
+ if(o.cancel_request)return false;
+ if(o.paid_at)return ["Cobrado","Devuelto"].includes(o.status)&&o.lines.some(l=>l.qty>0);
+ return ["Reservado","Por revisar"].includes(o.status)&&o.details.some(d=>d.status==="Entregado");
+}
 function cancelOrder(o){
  const withdrawal=wasSentToPreparation(o)?" Los detalles se retirarán de la cola de preparación.":"";
  modal("Anular comanda · "+o.code,`<p>Se anulará la comanda de ${h(o.table_name)} y se liberarán la mesa y sus insumos reservados.${withdrawal}</p>`,
    async()=>{await run("pedidos.cancel",{id:o.id,version:o.version},"Comanda anulada. Mesa e insumos liberados.");if(ticket.id===o.id){resetTicket();render()}},"Anular comanda");
 }
 function requestCancel(o){
- modal("Solicitar cancelación · "+o.code,input("reason","Motivo de cancelación","text","","required maxlength=500")+"<p>La mesa seguirá ocupada hasta la aprobación de Caja o Administración.</p>",async v=>run("pedidos.request_cancel",{id:o.id,version:o.version,reason:v.reason},"Solicitud enviada; la mesa continúa ocupada."),"Solicitar cancelación");
+ const effect=o.paid_at?"Caja revisará la solicitud antes de registrar la anulación del cobro.":
+   "La mesa seguirá ocupada hasta la aprobación de Caja o Administración.";
+ modal("Solicitar anulación · "+o.code,input("reason","Motivo de la solicitud","text","","required maxlength=500")+
+   `<p>${effect}</p>`,v=>run("pedidos.request_cancel",{id:o.id,version:o.version,reason:v.reason},"Solicitud de anulación enviada."),
+   "Enviar solicitud");
 }
 function decideCancel(o){
  const reason=o.cancel_request?.reason||"";
- const delivered=o.details.filter(d=>d.status==="Entregado");
- const inventory=delivered.length?`<fieldset id="cancel-restock"><legend>Detalles que regresan al inventario</legend>
-   ${delivered.map(d=>`<label class="check"><input type="checkbox" name="restock_${d.detail_no}">Detalle ${d.detail_no} · ${h(d.name)} × ${d.qty}</label>`).join("")}
-   <p class="muted">Los detalles entregados que queden sin marcar se registrarán como consumo.</p></fieldset>`:"";
- const dialog=modal("Resolver cancelación · "+o.code,`<p><b>Motivo</b> ${h(reason)}</p>${select("approve","Decisión",[["yes","Aprobar y liberar mesa"],["no","Rechazar y mantener comanda"]])}${inventory}${input("reason","Observación (opcional)","text","","maxlength=300")}`,v=>
-   run("pedidos.decide_cancel",{id:o.id,request_id:o.cancel_request.id,revision:o.cancel_request.revision,reason:v.reason,
-     approve:v.approve==="yes",restock_details:delivered.filter(d=>v["restock_"+d.detail_no]).map(d=>d.detail_no)},"Cancelación resuelta."),"Confirmar decisión");
+ const eligible=o.details.filter(d=>o.paid_at?d.refundable_qty>0:d.status==="Entregado");
+ const inventory=eligible.length?`<fieldset id="cancel-restock"><legend>Detalles que regresan al inventario</legend>
+   ${eligible.map(d=>`<label class="check"><input type="checkbox" name="restock_${d.detail_no}">Detalle ${d.detail_no} · ${h(d.name)} × ${o.paid_at?d.refundable_qty:d.qty}</label>`).join("")}
+   ${o.paid_at?"":'<p class="muted">Los detalles entregados que queden sin marcar se registrarán como consumo.</p>'}</fieldset>`:"";
+ const options=o.paid_at?[["","Selecciona una decisión"],["yes","Aprobar la anulación"],["no","Rechazar y mantener el cobro"]]:
+   [["yes","Aprobar y liberar mesa"],["no","Rechazar y mantener comanda"]];
+ const effect=o.paid_at?`<p class="notice">Importe pendiente de anular en Caja <strong>${cash(o.total)}</strong></p>`:"";
+ const dialog=modal("Resolver anulación · "+o.code,`<p><b>Motivo</b> ${h(reason)}</p>${effect}${select("approve","Decisión",options)}${inventory}${input("reason","Observación (opcional)","text","","maxlength=300")}`,v=>{
+   if(!v.approve)throw Error("Indica si apruebas o rechazas la solicitud.");
+   return run("pedidos.decide_cancel",{id:o.id,request_id:o.cancel_request.id,revision:o.cancel_request.revision,reason:v.reason,
+     expected_day:S.today,approve:v.approve==="yes",restock_details:eligible.filter(d=>v["restock_"+d.detail_no]).map(d=>d.detail_no)},
+     v.approve==="yes"?"Anulación aprobada.":"Solicitud rechazada.");
+ },"Confirmar decisión");
  const stock=dialog.querySelector("#cancel-restock");
  if(stock)dialog.querySelector('[name="approve"]').addEventListener("change",e=>{stock.hidden=e.target.value==="no"});
 }
 function displayOrderStatus(o){
- if(o.cancel_request)return "Cancelación solicitada";
+ if(o.cancel_request)return "Anulación solicitada";
  if(o.status!=="Reservado")return o.status;
  if(!o.lines.length||o.details.some(l=>l.pending))return wasSentToPreparation(o)?"Cambios por confirmar":"Pendiente de envío";
  if(o.details.filter(l=>l.status!=="Cancelado").every(l=>l.status==="Entregado"))return "Entregada · por cobrar";
  return "En preparación";
 }
 function details(o,manageReturns=false){
- const mayCharge=manageReturns&&["admin","caja"].includes(S.user.role);
+ const mayCharge=manageReturns&&!o.cancel_request&&["admin","caja"].includes(S.user.role);
  const rows=o.lines.map(l=>[h(l.name),h(l.qty),cash(l.price),h(l.prep_status||"Sin enviar")+(l.prep?.delivered_at?`<small class="sub">${h(l.prep.delivered_at)}</small>`:""),h(l.refunded),cash((l.qty-l.refunded)*l.price),o.status==="Cobrado"&&mayCharge&&l.qty>l.refunded?'<div class="actions">'+button("Devolver",()=>refund(o,l),"link")+button("Cambiar",()=>refund(o,l,true),"secondary")+'</div>':""]);
  const returns=(o.returns||[]).map(r=>[h(r.code),h(r.name),h(r.qty),h(r.reason)+(r.undone_at?`<small class="sub">Revertida · ${h(r.undone_by)}</small>`:"")+(r.replacement_sale_code?`<small class="sub">Reemplazo · ${h(r.replacement_sale_code)}</small>`:""),h(r.operator)]);
  const origin=o.exchange_origin;
  const paymentSummary=formatPayments(o.payments,o.payment_method);
  const source=origin?`<p class="notice">Reemplazo ${h(origin.exchange_code)} de la venta ${h(origin.sale_code)} · ${h(origin.code)} del ${h(displayDate(origin.day))} · Devolución ${h(origin.return_code)}.</p>`:"";
- modal(o.code+" · "+o.table_name,`${o.sale_void?`<p class="notice">Venta anulada · ${h(o.sale_void.actor)} · ${h(o.sale_void.at)} · ${h(o.sale_void.reason)}</p>`:""}${source}<p class="notice">${o.take_away?"Para llevar":"En el local"}</p>${table(["Detalle","Producto","Cantidad","Estado"],o.details.map(d=>[d.detail_no,h(d.name),d.qty,h(d.remove_pending&&d.pending?"Retiro pendiente de envío":d.pending?"Pendiente de envío":d.status)]))}<div class="summary"><span>${h(displayDate(o.day))} · ${h(o.operator)}</span>${badge(o.status)}</div>${table(["Producto","Uds.","Precio","Preparación / entrega","Dev.","Neto",""],rows)}<div class="total"><strong>Total neto</strong><strong>${cash(o.total)}</strong></div>${o.paid_at?`<p class="muted">Venta ${h(o.sale_code)} · Cobro registrado el ${h(o.paid_at)} por ${h(o.cashier)}.</p>${paymentSummary?`<p>${h(paymentSummary)}</p>`:""}`:""}${returns.length?`<h3>Devoluciones</h3>${table(["Código","Producto","Uds.","Motivo","Responsable"],returns)}`:""}`,null);
+ modal(o.code+" · "+o.table_name,`${o.sale_void?`<p class="notice">Venta anulada · ${h(o.sale_void.actor)} · ${h(o.sale_void.at)} · ${h(o.sale_void.reason)}</p>`:""}${source}<p class="notice">${o.take_away?"Para llevar":"En el local"}</p>${table(["Detalle","Producto","Cantidad","Estado"],o.details.map(d=>[d.detail_no,h(d.name),d.qty,h(d.remove_pending&&d.pending?"Retiro pendiente de envío":d.pending?"Pendiente de envío":d.status)]))}<div class="summary"><span>${h(displayDate(o.day))} · ${h(o.operator)}</span>${badge(o.status)}</div>${table(["Producto","Uds.","Precio","Preparación / entrega","Dev.","Neto",""],rows)}<div class="total"><strong>Total neto</strong><strong>${cash(o.total)}</strong></div>${o.paid_at?`<p class="muted">${o.sale_code?`Venta ${h(o.sale_code)} · `:""}Cobro registrado el ${h(o.paid_at)} por ${h(o.cashier)}.</p>${paymentSummary?`<p>${h(paymentSummary)}</p>`:""}`:""}${returns.length?`<h3>Devoluciones</h3>${table(["Código","Producto","Uds.","Motivo","Responsable"],returns)}`:""}`,null);
 }
 function viewOrdersDay(day){
  orderDay=day;orderQuery="";orderFilter="Todas";go("comandas");
@@ -388,10 +403,11 @@ function orderTable(){
    }
    if(canCancelOrder(o))acts+=button("Anular comanda",()=>cancelOrder(o),"danger");
  }
+ if(canRequestCancel(o))acts+=button("Solicitar anulación",()=>requestCancel(o),"secondary");
  return [`<b class="mono">${orderCode(o)}</b>`,`<strong>${h(o.table_name)}</strong><small class="sub">${o.take_away?"Para llevar":"En el local"}</small><small class="sub">${o.floor?`Piso ${o.floor}`:"Anterior a la actualización"}</small>`,badge(displayOrderStatus(o))+(o.cancel_request?`<small class="sub">${h(o.cancel_request.reason)}</small>`:""),h(o.created),cash(o.total),`<div class="actions">${acts}</div>`]}),"No hay comandas que coincidan con estos filtros.");
 }
 pages.comandas=()=>{
- const statuses=S.user.role==="atencion"?["Abiertas"]:["Abiertas","Cobradas","Canceladas","Todas"];if(!statuses.includes(orderFilter))orderFilter=statuses[0];
+ const statuses=S.user.role==="atencion"?["Abiertas","Cobradas"]:["Abiertas","Cobradas","Canceladas","Todas"];if(!statuses.includes(orderFilter))orderFilter=statuses[0];
  const day=orderDay??S.today,periodOrders=day?S.orders.filter(o=>o.day===day):S.orders;
  const metrics=[["Comandas abiertas",periodOrders.filter(o=>["Reservado","Por revisar"].includes(o.status)).length]];
  if(S.user.role!=="atencion"){

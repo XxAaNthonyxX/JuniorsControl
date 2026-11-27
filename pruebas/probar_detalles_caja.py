@@ -153,7 +153,10 @@ def run():
     assert sum(d["price"]*d["qty"] for d in sold["details"])==10
     after=lot_balances()
     assert before!=after
-    assert act("void_sale",reason="Venta incorrecta")["void_cents"]==500
+    rechazado(ValueError,lambda: act("void_sale",reason="Venta incorrecta"))
+    act("request_cancel",reason="Venta incorrecta")
+    assert order()["status"]=="Cobrado" and order()["cancel_request"]
+    assert act("decide_cancel",approve=True,restock_details=[])["void_cents"]==500
     assert lot_balances()==after and order()["status"]=="Anulada"
     rechazado(ValueError,lambda: act("void_sale",reason="Duplicada"))
     action(inv,"pedidos.save",dict(table_number=11,lines=details(6,6)))

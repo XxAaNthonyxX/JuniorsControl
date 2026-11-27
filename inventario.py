@@ -532,7 +532,8 @@ def _may_work(user, area):
 
 
 def _pending_cancel(db, order_id):
-    return db.execute("SELECT id,revision FROM inv_cancel_requests WHERE order_id=? AND status='Pendiente'",(order_id,)).fetchone()
+    return db.execute("""SELECT id,revision,reason,request_day FROM inv_cancel_requests
+                         WHERE order_id=? AND status='Pendiente'""",(order_id,)).fetchone()
 
 
 def _has_delivered_details(db, order_id):
@@ -803,28 +804,31 @@ def _pay(db,user,p,*,exchange=False):
 
 def _void_sale(db,user,p):
     _role(user,"caja","admin")
-    o=_get_order(db,p)
-    if o["status"] not in ("Reservado","Por revisar","Cobrado","Devuelto"):
-        raise ValueError("La venta ya está cerrada o anulada.")
-    _check_version(o,p)
-    day=business_day(db)
-    if p.get("expected_day",day)!=day:
-        raise ValueError("Cambió la jornada de caja. Actualiza antes de anular.")
-    reason=_text(p.get("reason"),"motivo de anulación",300)
-    oid=o["id"]
-    if not o["paid_at"]:
-        raise ValueError("Gestiona la anulación de una comanda abierta mediante una solicitud.")
-    if not db.execute("SELECT 1 FROM inv_details WHERE order_id=? AND status='Entregado'",(oid,)).fetchone():
-        raise ValueError("Se requiere al menos un producto entregado para anular la venta.")
-    cents=db.execute("SELECT SUM(price*(qty-refunded)) FROM inv_lines WHERE order_id=?",(oid,)).fetchone()[0]
+    raise ValueError("Envía una solicitud y resuélvela desde Solicitudes y devoluciones.")
+
+
+def _paid_order_lines(db,order_id):
+    return {r["product_id"]:r for r in db.execute("""SELECT l.* FROM inv_lines l
+                     JOIN inv_sales s ON s.order_id=l.order_id WHERE l.order_id=? AND l.qty>0""",(order_id,))}
+
+
+def _approve_paid_cancel(db,user,order,request,restock,day):
+    oid=order["id"]
+    lines=_paid_order_lines(db,oid)
+    if order["status"] not in ("Cobrado","Devuelto") or not lines:
+        raise ValueError("La comanda no tiene un cobro registrado que se pueda anular.")
+    cents=sum(line["price"]*(line["qty"]-line["refunded"]) for line in lines.values())
     at=now()
-    db.execute("INSERT sale_voids(order_id,cash_day,at,actor,reason,cents) VALUES(?,?,?,?,?,?)",
-               (oid,day,at,user["name"],reason,cents))
+    db.execute("INSERT sale_voids(order_id,cash_day,at,actor,reason,cents,cancel_request_id) VALUES(?,?,?,?,?,?,?)",
+               (oid,day,at,user["name"],request["reason"],cents,request["id"]))
+    if restock:
+        _restore_paid_cancel_stock(db,user,order,lines,restock)
     db.execute("""UPDATE refund_requests SET status='Rechazada',decision_reason='Venta anulada',
-                  decided_by=?,decided_at=?,revision=revision+1 WHERE order_id=? AND status='Pendiente'""",(user["name"],at,oid))
+                  decided_by=?,decided_at=?,voided_by_cancel_id=?,revision=revision+1 WHERE order_id=? AND status='Pendiente'""",
+               (user["name"],at,request["id"],oid))
     db.execute("UPDATE inv_orders SET status='Anulada',version=version+1 WHERE id=?",(oid,))
-    _event(db,user,oid,"Venta anulada",reason)
-    return {"id":oid,"void_cents":cents}
+    _event(db,user,oid,"Venta anulada",request["reason"])
+    return cents
 
 
 def _cancel(db,user,p):
@@ -835,7 +839,7 @@ def _cancel(db,user,p):
     if o["status"]=="Cancelado":
         return {"id":o["id"]}
     if o["status"] not in ("Por revisar","Reservado"):
-        raise ValueError("Para corregir una venta cobrada, registra una devolución.")
+        raise ValueError("Para anular una venta cobrada, envía una solicitud de anulación.")
     _check_version(o,p)
     if _has_delivered_details(db,o["id"]):
         raise ValueError("La comanda tiene productos entregados. Solicita la anulación para que Caja la revise.")
@@ -869,12 +873,63 @@ def _detail_refundable(details,returned,refunded):
     return available
 
 
+def _sold_lots(db,order_id,product_id):
+    grouped=defaultdict(list)
+    for r in db.execute("""SELECT a.*,l.item_id,l.expiry FROM inv_alloc a JOIN inv_lots l ON l.id=a.lot_id
+                           WHERE a.order_id=? AND a.product_id=?
+                           ORDER BY CASE WHEN l.expiry IS NULL THEN 1 ELSE 0 END,l.expiry,l.id""",(order_id,product_id)):
+        grouped[r["item_id"]].append(r)
+    return grouped
+
+
+def _restore_paid_cancel_stock(db,user,order,lines,selected):
+    oid=order["id"]
+    details=defaultdict(list)
+    for d in db.execute("""SELECT detail_no,product_id,qty FROM inv_details
+                           WHERE order_id=? AND (status='Entregado' OR status IS NULL)""",(oid,)):
+        details[d["product_id"]].append(d)
+    returned={number:qty for (_,number),qty in _returned_detail_totals(db,oid).items()}
+    units=defaultdict(int)
+    unmatched=set(selected)
+    for pid,line in lines.items():
+        for number,remaining in _detail_refundable(details[pid],returned,line["refunded"]).items():
+            if number in selected and remaining>0:
+                units[pid]+=remaining
+                unmatched.discard(number)
+    if unmatched:
+        raise ValueError("Selecciona únicamente detalles cobrados con unidades pendientes de reposición.")
+    restored=defaultdict(int)
+    for pid,qty in units.items():
+        line=lines[pid]
+        lots=_sold_lots(db,oid,pid)
+        if not lots:
+            raise ValueError("El detalle no tiene lotes registrados para reponer.")
+        for parts in lots.values():
+            needed=sum(r["amount"] for r in parts)//line["qty"]*qty
+            for r in parts:
+                take=min(needed,r["amount"]-r["processed"])
+                if take:
+                    if r["expiry"] and r["expiry"]<today():
+                        raise ValueError("El lote original venció. Revisa qué detalles pueden volver al inventario.")
+                    _move(db,user,r["lot_id"],take,"Reposición por anulación de venta",_order_ref(order))
+                    restored[r["lot_id"]]+=take
+                    needed-=take
+                if not needed:
+                    break
+            if needed:
+                raise ValueError("No se pudo calcular la reposición del detalle.")
+    db.executemany("INSERT INTO sale_void_stock(order_id,lot_id,amount) VALUES(?,?,?)",
+                   ((oid,lot,amount) for lot,amount in restored.items()))
+
+
 def _refund(db,user,p,*,resolving=0):
     _role(user,"caja","admin")
     o=_get_order(db,p)
     if o["status"]!="Cobrado":
         raise ValueError("Selecciona una venta cobrada con unidades pendientes de devolución.")
     _check_version(o,p)
+    if _pending_cancel(db,o["id"]):
+        raise ValueError("Resuelve la solicitud de anulación antes de registrar una devolución.")
     pid=_id(p.get("product_id"))
     n=_scaled(p.get("qty"),1,"Unidades a devolver",high=1_000_000_000 if p.get("details") is not None else 10000)
     reason=_text(p.get("reason"),"motivo",300)
@@ -910,11 +965,7 @@ def _refund(db,user,p,*,resolving=0):
     if not isinstance(restock,list):
         raise ValueError("Revisa la selección de insumos recuperables.")
     restock={_id(v) for v in restock}
-    rows=db.execute("""SELECT a.*,l.item_id,l.expiry FROM inv_alloc a JOIN inv_lots l ON l.id=a.lot_id
-                       WHERE a.order_id=? AND a.product_id=? ORDER BY CASE WHEN l.expiry IS NULL THEN 1 ELSE 0 END,l.expiry,l.id""",(o["id"],pid))
-    grouped=defaultdict(list)
-    for r in rows:
-        grouped[r["item_id"]].append(r)
+    grouped=_sold_lots(db,o["id"],pid)
     if resolving and details is None and "restock" not in p:
         restock=set(grouped)
     if not restock.issubset(grouped):
@@ -1117,12 +1168,17 @@ def _ask_cancel(db,user,p):
     _role(user,"admin","caja","atencion")
     o=_get_order(db,p)
     _check_version(o,p)
-    if o["status"] not in ("Reservado","Por revisar"):
-        raise ValueError("La comanda ya está cerrada; utiliza devoluciones para ventas cobradas.")
+    if o["paid_at"] and o["status"] in ("Cobrado","Devuelto"):
+        if user["role"]=="atencion" and o["user_id"]!=user["id"]:
+            raise PermissionError("Solo puedes solicitar la anulación de tus comandas cobradas.")
+        if not _paid_order_lines(db,o["id"]):
+            raise ValueError("La comanda debe tener al menos un detalle cobrado.")
+    elif o["status"] not in ("Reservado","Por revisar"):
+        raise ValueError("La comanda ya está anulada o cerrada.")
+    elif not _has_delivered_details(db,o["id"]):
+        raise ValueError("La solicitud requiere un producto entregado. Anula la comanda directamente desde Comandas.")
     if _pending_cancel(db,o["id"]):
         raise ValueError("Ya existe una solicitud de cancelación pendiente.")
-    if not _has_delivered_details(db,o["id"]):
-        raise ValueError("La solicitud requiere un producto entregado. Anula la comanda directamente desde Comandas.")
     reason=_text(p.get("reason"),"motivo",500)
     cid=db.execute("""INSERT INTO inv_cancel_requests(order_id,status,reason,requester,requested_at,requester_id,request_day)
                        OUTPUT INSERTED.id VALUES(?,'Pendiente',?,?,?,?,?)""",(o["id"],reason,user["name"],now(),user["id"],business_day(db))).lastrowid
@@ -1156,8 +1212,19 @@ def _decide_cancel(db,user,p):
         raise ValueError("Actualiza la solicitud de cancelación antes de resolverla.")
     if p.get("revision",r["revision"])!=r["revision"]:
         raise ValueError("La solicitud cambió. Actualiza antes de resolverla.")
-    approved=p.get("approve") is True
-    if approved:
+    approved=p.get("approve")
+    if type(approved) is not bool:
+        raise ValueError("Indica si apruebas o rechazas la solicitud.")
+    day=business_day(db)
+    if p.get("expected_day",day)!=day or (r["request_day"] and day!=r["request_day"]):
+        raise ValueError("Abre la jornada de la solicitud antes de resolverla.")
+    cents=None
+    if approved and o["paid_at"]:
+        selected=p.get("restock_details",[])
+        if not isinstance(selected,list):
+            raise ValueError("Indica cuáles detalles cobrados regresan al inventario.")
+        cents=_approve_paid_cancel(db,user,o,r,{_id(number) for number in selected},day)
+    elif approved:
         delivered=list(db.execute("""SELECT detail_no,sent_product,sent_qty FROM inv_details
                                     WHERE order_id=? AND status='Entregado'""",(o["id"],)))
         selected=p.get("restock_details",[] if not delivered else None)
@@ -1174,7 +1241,10 @@ def _decide_cancel(db,user,p):
                ("Aprobada" if approved else "Rechazada",now(),user["name"],
                 _text(p["reason"],"observación",300) if p.get("reason") else None,o["status"],r["id"]))
     _event(db,user,o["id"],"Cancelación aprobada" if approved else "Cancelación rechazada")
-    return {"id":o["id"],"aprobada":approved}
+    result={"id":o["id"],"aprobada":approved}
+    if cents is not None:
+        result["void_cents"]=cents
+    return result
 
 
 def _preparation(db,user):
@@ -1280,10 +1350,14 @@ def _orders(db,user,balances):
     if user["role"] not in ("admin","caja","atencion"):
         return []
     attending=user["role"]=="atencion"
-    sql="SELECT * FROM inv_orders"
+    sql="SELECT o.* FROM inv_orders o"
+    scope=""
+    scope_args=()
     if attending:
-        sql+=" WHERE status IN ('Reservado','Por revisar')"
-    rows={r["id"]:dict(r) for r in db.execute(sql+" ORDER BY id DESC")}
+        scope=""" WHERE o.status IN ('Reservado','Por revisar')
+                    OR (o.user_id=? AND o.paid_at IS NOT NULL AND o.status IN ('Cobrado','Devuelto'))"""
+        scope_args=(user["id"],)
+    rows={r["id"]:dict(r) for r in db.execute(sql+scope+" ORDER BY o.id DESC",scope_args)}
     if not rows:
         return []
     returned_details={} if attending else _returned_detail_totals(db)
@@ -1344,9 +1418,7 @@ def _orders(db,user,balances):
     part_sql="""SELECT a.order_id,a.product_id,l.item_id,i.name,i.unit,SUM(a.amount) AS n FROM inv_alloc a
                 JOIN inv_lots l ON l.id=a.lot_id JOIN inv_items i ON i.id=l.item_id JOIN inv_orders o ON o.id=a.order_id"""
     if attending:
-        predicate=" WHERE o.status IN ('Reservado','Por revisar')"
-        line_sql+=predicate
-        part_sql+=predicate
+        part_sql+=" WHERE o.status IN ('Reservado','Por revisar')"
     ingredients=defaultdict(list)
     for row in db.execute(part_sql+" GROUP BY a.order_id,a.product_id,l.item_id,i.name,i.unit"):
         ingredients[(row["order_id"],row["product_id"])].append(
@@ -1364,7 +1436,7 @@ def _orders(db,user,balances):
         for d in order["details"]:
             if d["status"]!="Cancelado":
                 detail_groups[(order["id"],d["product_id"])].append(d)
-    for row in db.execute(line_sql+" ORDER BY l.order_id,l.product_id"):
+    for row in db.execute(line_sql+scope+" ORDER BY l.order_id,l.product_id",scope_args):
         line=dict(row)
         order=rows[line.pop("order_id")]
         order["gross"]+=line["price"]*line["qty"]
@@ -1374,7 +1446,7 @@ def _orders(db,user,balances):
         line["ingredients"]=ingredients[key]
         group=detail_groups[key]
         line["prep_status"]="Entregado" if group and all(d["status"]=="Entregado" for d in group) else "Pendiente"
-        if order["status"]=="Cobrado":
+        if not attending and order["status"]=="Cobrado":
             candidates=[d for d in group if d["status"] in ("Entregado",None)]
             returned={d["detail_no"]:returned_details.get((order["id"],d["detail_no"]),0) for d in candidates}
             available=_detail_refundable(candidates,returned,line["refunded"])
@@ -1442,6 +1514,8 @@ def _request_refund(db,user,p):
     order=_get_order(db,p)
     if order["status"]!="Cobrado" or (user["role"]=="atencion" and order["user_id"]!=user["id"]):
         raise ValueError("Selecciona una venta cobrada que puedas gestionar.")
+    if _pending_cancel(db,order["id"]):
+        raise ValueError("Resuelve la solicitud de anulación antes de solicitar devoluciones.")
     pid=_id(p.get("product_id"))
     qty=_scaled(p.get("qty"),1,"Unidades",high=10000)
     reason=_text(p.get("reason"),"motivo",300)
@@ -1474,6 +1548,28 @@ def _resolve_refund(db,user,p):
     return {}
 
 
+def _undo_paid_cancel(db,user,order,request,day):
+    oid=order["id"]
+    if request["prior_status"] not in ("Cobrado","Devuelto"):
+        raise ValueError("La comanda se cobró después de resolver la solicitud.")
+    if request["status"]=="Rechazada":
+        if order["status"] not in ("Cobrado","Devuelto"):
+            raise ValueError("La venta ya cambió de estado.")
+        return
+    void=db.execute("SELECT cash_day FROM sale_voids WHERE order_id=? AND cancel_request_id=?",
+                    (oid,request["id"])).fetchone()
+    if order["status"]!="Anulada" or not void or void["cash_day"]!=day:
+        raise ValueError("La anulación de venta ya cambió o corresponde a otra jornada.")
+    for lot,amount in db.execute("SELECT lot_id,amount FROM sale_void_stock WHERE order_id=?",(oid,)):
+        _move(db,user,lot,-amount,"Reversión de reposición por anulación de venta",_order_ref(order))
+    db.execute("DELETE FROM sale_void_stock WHERE order_id=?",(oid,))
+    db.execute("DELETE FROM sale_voids WHERE order_id=?",(oid,))
+    db.execute("""UPDATE refund_requests SET status='Pendiente',decided_by=NULL,decided_at=NULL,
+                  decision_reason=NULL,voided_by_cancel_id=NULL,revision=revision+1 WHERE voided_by_cancel_id=?""",
+               (request["id"],))
+    db.execute("UPDATE inv_orders SET status=? WHERE id=?",(request["prior_status"],oid))
+
+
 def _undo_request(db,user,p):
     _role(user,"admin","caja")
     kind=p.get("kind")
@@ -1485,7 +1581,7 @@ def _undo_request(db,user,p):
     if not req or req["status"] not in ("Aprobada","Rechazada") or req["revision"]!=p.get("revision"):
         raise ValueError("La decisión cambió. Actualiza la página.")
     order=_get_order(db,{"id":req["order_id"]})
-    if order["status"]=="Anulada":
+    if not cancellation and order["status"]=="Anulada":
         raise ValueError("La venta está anulada.")
     day=business_day(db)
     request_day=req["request_day"] or order["day"]
@@ -1493,9 +1589,11 @@ def _undo_request(db,user,p):
         raise ValueError("Abre la jornada de la solicitud antes de deshacer.")
     oid=order["id"]
     approved=req["status"]=="Aprobada"
-    if cancellation:
-        if _pending_cancel(db,oid) or order["paid_at"]:
-            raise ValueError("La comanda tiene otra solicitud pendiente o ya fue cobrada.")
+    if _pending_cancel(db,oid):
+        raise ValueError("Resuelve la solicitud de anulación pendiente antes de deshacer otra decisión.")
+    if cancellation and order["paid_at"]:
+        _undo_paid_cancel(db,user,order,req,day)
+    elif cancellation:
         if approved:
             if order["status"]!="Cancelado":
                 raise ValueError("La comanda ya cambió de estado.")
@@ -1549,12 +1647,13 @@ def _service_requests(db,user):
         return [dict(r) for r in db.execute(query+predicate+" ORDER BY r.id DESC",values)]
     orders=" JOIN inv_orders o ON o.id=r.order_id"
     return dict(
-        cancellations=records("SELECT r.*,o.number,o.day,o.table_name FROM inv_cancel_requests r"+orders),
+        cancellations=records("SELECT r.*,o.number,o.day,o.table_name,o.paid_at FROM inv_cancel_requests r"+orders),
         refunds=records("SELECT r.*,o.number,o.day,o.table_name,l.name FROM refund_requests r"+orders+
                         " JOIN inv_lines l ON l.order_id=r.order_id AND l.product_id=r.product_id"),
         refundable=[dict(r) for r in db.execute("""SELECT o.id,o.number,o.day,o.table_name,l.product_id,l.name,
                     l.qty-l.refunded-COALESCE((SELECT SUM(qty) FROM refund_requests rr WHERE rr.order_id=o.id AND rr.product_id=l.product_id AND rr.status='Pendiente'),0) AS remaining FROM inv_orders o JOIN inv_lines l ON l.order_id=o.id
-                    JOIN inv_sales sale ON sale.order_id=o.id WHERE COALESCE(sale.cash_day,LEFT(o.paid_at,10))=? AND o.status='Cobrado' AND l.qty>l.refunded"""+("" if manager else " AND o.user_id=?")+
+                    JOIN inv_sales sale ON sale.order_id=o.id WHERE COALESCE(sale.cash_day,LEFT(o.paid_at,10))=? AND o.status='Cobrado' AND l.qty>l.refunded
+                    AND NOT EXISTS (SELECT 1 FROM inv_cancel_requests cr WHERE cr.order_id=o.id AND cr.status='Pendiente')"""+("" if manager else " AND o.user_id=?")+
                     " ORDER BY o.id DESC,l.product_id",(day,) if manager else (day,user["id"]))])
 
 

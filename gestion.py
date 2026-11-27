@@ -105,7 +105,7 @@ def _receipt(db, user, p):
     _require(user, "admin", "recepcion")
     item = _item(db, p.get("item_id"))
     supplier = _text(p.get("supplier"), "proveedor", 100)
-    quantity = inv.item_quantity(item["name"],p.get("qty"))
+    quantity = inv.item_quantity(item["name"],p.get("qty"),unit=item["unit"])
     cost = _int(p.get("unit_cents", 0), "precio unitario")
     _cap_line(quantity, cost)
     cur = db.execute("""INSERT INTO g_receipts(item_id,supplier,qty_m,unit_cents,created,actor) OUTPUT INSERTED.id
@@ -119,9 +119,11 @@ def _receive(db, user, p):
     if r["approved_m"] is not None:
         raise ValueError("Esta recepción ya fue revisada.")
     item = _item(db,r["item_id"])
-    approved = inv.item_quantity(item["name"],p.get("approved"),"Cantidad aprobada",minimum=0,previous=r["qty_m"])
+    approved = inv.item_quantity(item["name"],p.get("approved"),"Cantidad aprobada",unit=item["unit"],
+                                 minimum=0,previous=r["qty_m"])
     # En la interfaz anterior se conocía el total de la diferencia, sin su desglose.
-    received = inv.item_quantity(item["name"],p["received"],"Cantidad entregada",minimum=0,previous=r["qty_m"]) if "received" in p else None
+    received = inv.item_quantity(item["name"],p["received"],"Cantidad entregada",unit=item["unit"],
+                                 minimum=0,previous=r["qty_m"]) if "received" in p else None
     if received is not None and approved > received:
         raise ValueError("La cantidad aprobada supera la entregada por el proveedor.")
     if approved > r["qty_m"]:
@@ -175,7 +177,8 @@ def _waste(db, user, p):
     item = _item(db, p.get("item_id"))
     if not _waste_accessible(user, item["area"]):
         raise PermissionError("El insumo pertenece a otra área.")
-    source_id,quantity=inv.porciones.resolve(db,item["id"],inv.item_quantity(item["name"],p.get("qty")))
+    amount=inv.item_quantity(item["name"],p.get("qty"),unit=item["unit"])
+    source_id,quantity=inv.porciones.resolve(db,item["id"],amount)
     lot_id = _int(p["lot_id"], "lote", 1) if p.get("lot_id") not in (None,"") else None
     reason = _text(p.get("reason"), "motivo de la merma", 500)
     at = stamp()
@@ -229,7 +232,7 @@ def _lines(db, rows, previous=None):
         if item_id in seen:
             raise ValueError("Agrupa la cantidad del mismo insumo en una sola línea.")
         seen.add(item_id)
-        quantity = inv.item_quantity(item["name"],r.get("qty"),previous=previous.get(item_id))
+        quantity = inv.item_quantity(item["name"],r.get("qty"),unit=item["unit"],previous=previous.get(item_id))
         cost = _int(r.get("unit_cents"), "precio unitario")
         _cap_line(quantity, cost)
         checked.append((item_id, quantity, cost))
@@ -377,7 +380,7 @@ def _report(db, actor, scheduled, stocks=None, at=None):
             continue
         # Restablecer un objetivo de dos mínimos; en un mínimo cero proponemos una unidad.
         suggested = max(1000 if minimum == 0 else 1, minimum*2-available)
-        if not inv.allows_decimal(item["name"]):
+        if not inv.allows_decimal(item["name"]) and item["unit"].strip().casefold() not in inv.SMALL_STOCK_UNITS:
             suggested = ((suggested+999)//1000)*1000
         shortages.append((item["id"],available,minimum,suggested))
         lines.append((item["id"],suggested,_price(db,item["id"])))
@@ -395,7 +398,7 @@ def _report(db, actor, scheduled, stocks=None, at=None):
 def _configure_alerts(db, user, payload):
     _require(user, "admin")
     item = inv._item(db, payload.get("item_id"))
-    minimum = inv.item_quantity(item["name"],payload.get("min_qty"),"Cantidad mínima crítica",
+    minimum = inv.item_quantity(item["name"],payload.get("min_qty"),"Cantidad mínima crítica",unit=item["unit"],
                                 minimum=0,previous=item["min_qty"])
 
     if "warn_days" in payload:
@@ -418,8 +421,10 @@ def _alerts(db, stocks):
     active = {}
     for i in stocks:
         if i["available"] <= i["min_qty"]:
+            unit=inv.SMALL_STOCK_UNITS.get(i["unit"].strip().casefold()) if not inv.allows_decimal(i["name"]) else None
+            available=str(round(i["available"]*1000)) if unit else f"{i['available']:g}"
             active[f"min.{i['id']}"] = ("Stock mínimo",i["id"],
-                f"{i['name']} alcanzó el mínimo. Disponible al activar la alerta: {i['available']:g} {i['unit']}.")
+                f"{i['name']} alcanzó el mínimo. Disponible al activar la alerta: {available} {unit or i['unit']}.")
     for lot in inv.batches(db):
         if lot["physical"] <= 0 or not lot["expiry"]:
             continue

@@ -82,8 +82,8 @@
     background: #edf0e8;
     color: #202725;
   }
-  #purchase-print th:nth-child(n+3),
-  #purchase-print td:nth-child(n+3) {
+  #purchase-print th:nth-child(n+2),
+  #purchase-print td:nth-child(n+2) {
     text-align: right;
     white-space: nowrap;
   }

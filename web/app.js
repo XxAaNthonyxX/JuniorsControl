@@ -44,15 +44,45 @@ function brand(){return `<div class="brand"><i>${icon("flame")}</i><div><b>Junio
 function h(value){return String(value??"").replace(/[&<>"']/g,c=>({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]))}
 function cash(n){return `S/ ${Number(n||0).toLocaleString("es-PE",{minimumFractionDigits:2,maximumFractionDigits:2})}`}
 function fmt(n){return Number(n||0).toLocaleString("es-PE",{maximumFractionDigits:3})}
-function itemQuantityStep(name,previous=null,value=previous){
+function allowsDecimalQuantity(name){
  const words=String(name||"").toLowerCase().split(/[^\p{L}\p{N}_]+/u);
- if(words.some(word=>["papa","papas","arroz"].includes(word)))return 0.001;
+ return words.some(word=>["papa","papas","arroz"].includes(word));
+}
+function itemQuantityStep(name,previous=null,value=previous){
+ if(allowsDecimalQuantity(name))return 0.001;
  return previous!=null&&Number(previous)%1!==0&&Number(value)===Number(previous)?0.001:1;
 }
 function setItemQuantityStep(field,name,allowZero=false,previous=null){
  const step=itemQuantityStep(name,previous,field.value);
  field.step=step;
  field.min=allowZero?0:step;
+}
+function stockMeasure(name,unit){
+ if(allowsDecimalQuantity(name))return {unit,factor:1};
+ const key=String(unit||"").trim().toLowerCase();
+ if(["kg","kgs","kilo","kilos","kilogramo","kilogramos"].includes(key))return {unit:"g",factor:1000};
+ if(["l","lt","lts","litro","litros"].includes(key))return {unit:"mL",factor:1000};
+ return {unit,factor:1};
+}
+function stockInputValue(name,unit,quantity){
+ if(quantity==null||quantity==="")return "";
+ return stockMeasure(name,unit).factor===1000?Math.round(Number(quantity)*1000):quantity;
+}
+function stockQuantityPayload(name,unit,value){
+ const measure=stockMeasure(name,unit);
+ return measure.factor===1000?{unit:measure.unit,value}:value;
+}
+function formatStockQuantity(name,unit,quantity){
+ const measure=stockMeasure(name,unit);
+ const value=Number(stockInputValue(name,unit,quantity));
+ if(Number.isInteger(value))return `${value} ${measure.unit}`;
+ if(allowsDecimalQuantity(name))return `${fmt(value)} ${measure.unit}`;
+ const thousandths=Math.round(Math.abs(value)*1000);
+ const whole=Math.floor(thousandths/1000);
+ const fraction=thousandths%1000;
+ if(!fraction)return `${Math.round(value)} ${measure.unit}`;
+ const parts=whole?`${whole} + ${fraction}/1000`:`${fraction}/1000`;
+ return `${value<0?"−":""}${parts} ${measure.unit}`;
 }
 function exportCsv(filename,rows){
  const encode=value=>{

@@ -15,6 +15,10 @@ LIMA = timezone(timedelta(hours=-5))
 SYSTEM = {"id": 0, "name": "Sistema", "role": "admin", "area": ""}
 INVENTORY_AREAS = ("Brasas", "Parrillas", "Barra", "Orientales", "Limpieza y Atención")
 PAYMENT_METHODS = ("Efectivo", "Yape", "Tarjeta")
+SMALL_STOCK_UNITS = (
+    dict.fromkeys(("kg","kgs","kilo","kilos","kilogramo","kilogramos"),"g")
+    | dict.fromkeys(("l","lt","lts","litro","litros"),"mL")
+)
 STAFF_AREAS = ("Cocina", "Barra", "Parrilla", "Limpieza", "Atención", "Horno")
 STAFF_INVENTORY_AREAS = {
     "cocina": ("Orientales",),
@@ -77,7 +81,12 @@ def check_item_quantity(name, amount, previous=None):
     return amount
 
 
-def item_quantity(name, value, label="Cantidad", *, minimum=1, previous=None):
+def item_quantity(name, value, label="Cantidad", *, unit="", minimum=1, previous=None):
+    if isinstance(value,dict):
+        smaller_unit=None if allows_decimal(name) else SMALL_STOCK_UNITS.get(unit.strip().casefold())
+        if not smaller_unit or value.get("unit")!=smaller_unit:
+            raise ValueError(f"{name}: revisa la unidad de la cantidad indicada.")
+        return _scaled(value.get("value"),1,label,minimum)
     return check_item_quantity(name,_scaled(value,1000,label,minimum),previous)
 
 
@@ -296,7 +305,7 @@ def _save_item(db, user, p):
     fields = [_text(p.get("name"),"nombre",100), _text(p.get("category"),"categoría",60),
               _item_area(p.get("area")), _text(p.get("unit"),"unidad",20)]
     item=_item(db,p["id"]) if p.get("id") else None
-    fields += [item_quantity(fields[0],p.get("min_qty",0),"Stock mínimo",minimum=0,
+    fields += [item_quantity(fields[0],p.get("min_qty",0),"Stock mínimo",unit=fields[3],minimum=0,
                             previous=item["min_qty"] if item else None),
                _scaled(p.get("warn_days",3),1,"Días de aviso",0,3650),
                _bool(p.get("perishable")), _bool(p.get("transformable"))]
@@ -400,9 +409,11 @@ def _save_product(db, user, p, *, demo=False):
         if not isinstance(row,dict):
             raise ValueError("Revisa los insumos de la receta.")
         ingredient = _item(db,row.get("item_id"))
-        requested=qty(row.get("qty"))
+        quantity=row.get("qty")
+        measured=isinstance(quantity,dict)
+        requested=item_quantity(ingredient["name"],quantity,unit=ingredient["unit"]) if measured else qty(quantity)
         item,amount=porciones.resolve(db,ingredient["id"],requested)
-        if not demo and previous.get(item)!=amount:
+        if not measured and not demo and previous.get(item)!=amount:
             check_item_quantity(ingredient["name"],requested)
         if item in added:
             raise ValueError("Agrupa las cantidades del mismo insumo en una línea de receta.")
@@ -419,8 +430,10 @@ def _rule(db,user,p):
         raise ValueError("Selecciona un insumo transformable y un producto de destino diferente.")
     existing=db.execute("SELECT source_qty,target_qty FROM inv_rules WHERE source_id=? AND target_id=?",
                         (source["id"],target["id"])).fetchone()
-    source_qty=item_quantity(source["name"],p.get("source_qty"),"Cantidad consumida",previous=existing[0] if existing else None)
-    target_qty=item_quantity(target["name"],p.get("target_qty"),"Cantidad producida",previous=existing[1] if existing else None)
+    source_qty=item_quantity(source["name"],p.get("source_qty"),"Cantidad consumida",unit=source["unit"],
+                             previous=existing[0] if existing else None)
+    target_qty=item_quantity(target["name"],p.get("target_qty"),"Cantidad producida",unit=target["unit"],
+                             previous=existing[1] if existing else None)
     values=(source_qty,target_qty,source["id"],target["id"])
     if not db.execute("UPDATE inv_rules SET source_qty=?,target_qty=? WHERE source_id=? AND target_id=?",values).rowcount:
         db.execute("INSERT INTO inv_rules(source_qty,target_qty,source_id,target_id) VALUES(?,?,?,?)",values)
@@ -1332,7 +1345,8 @@ def act(db,user,action,payload):
         item=_item(db,payload.get("item_id"))
         _in_area(user,item["area"])
         detail=_text(payload.get("reason"),"motivo",300)
-        withdraw(db,user,item["id"],item_quantity(item["name"],payload.get("qty")),"Consumo · "+detail,item["area"])
+        amount=item_quantity(item["name"],payload.get("qty"),unit=item["unit"])
+        withdraw(db,user,item["id"],amount,"Consumo · "+detail,item["area"])
         return {}
     if action not in routes:
         raise ValueError("Operación de inventario desconocida.")

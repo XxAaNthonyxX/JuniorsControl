@@ -86,7 +86,8 @@ function detailCard(l){
 function productStock(p){
  const rows=p.recipe.map(line=>{
    const count=Math.floor(Math.round(line.available*1000)/Math.round(line.qty*1000));
-   return [h(line.name),`${fmt(line.qty)} ${h(line.unit)}`,`${fmt(line.available)} ${h(line.unit)}`,fmt(count)];
+   return [h(line.name),h(formatStockQuantity(line.name,line.unit,line.qty)),
+     h(formatStockQuantity(line.name,line.unit,line.available)),fmt(count)];
  });
  modal('Disponibilidad · '+p.name,
    `<p>Platos disponibles con todos los insumos de la receta: <b>${fmt(p.available)}</b>.</p>`+

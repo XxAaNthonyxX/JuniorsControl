@@ -15,7 +15,8 @@
   const numberAttrs = 'min="0" step="0.01"';
   const stack = (...parts) => '<div class="stack">'+parts.filter(Boolean).join("")+'</div>';
   const item = id => rows("items").find(x=>x.id === id);
-  const itemOptions = () => rows("items").map(x=>[x.id, x.code+" · "+x.name+" ("+x.unit+")"]);
+  const qtyText = (record,value) => formatStockQuantity(record.item_name||record.name,record.unit,value);
+  const itemOptions = () => rows("items").map(x=>[x.id,`${x.code} · ${x.name} (${stockMeasure(x.name,x.unit).unit})`]);
   const note = value => '<p class="muted">'+e(value)+'</p>';
   const metric = (name,value) => '<div class="metric"><span class="muted">'+e(name)+'</span><div class="value">'+e(value)+'</div></div>';
   const group = (...metrics) => '<div class="metrics">'+metrics.join("")+'</div>';
@@ -31,11 +32,23 @@
       input("qty","Cantidad prevista","number","",qtyAttrs)+
       input("cost","Costo unitario (S/)","number","",numberAttrs+" required")+
       note("La entrega quedará pendiente de revisión. El stock aumenta al aprobar las unidades recibidas."),
-      v=>run("gestion.receipt",{item_id:v.item_id, supplier:v.supplier, qty:v.qty, unit_cents:cents(v.cost)},"Entrega registrada"),
+      v=>{
+        const selected=item(Number(v.item_id));
+        return run("gestion.receipt",{item_id:v.item_id,supplier:v.supplier,
+          qty:stockQuantityPayload(selected?.name,selected?.unit,v.qty),unit_cents:cents(v.cost)},"Entrega registrada");
+      },
       "Registrar entrega");
     const form=dialog.querySelector("form");
     const itemField=form.elements.namedItem("item_id");
-    const update=()=>setItemQuantityStep(form.elements.namedItem("qty"),item(Number(itemField.value))?.name);
+    const update=()=>{
+      const selected=item(Number(itemField.value));
+      const field=form.elements.namedItem("qty");
+      const displayUnit=stockMeasure(selected?.name,selected?.unit).unit;
+      field.closest("label").querySelector("span").textContent=displayUnit?`Cantidad prevista (${displayUnit})`:"Cantidad prevista";
+      form.elements.namedItem("cost").closest("label").querySelector("span").textContent=
+        selected?`Costo por ${selected.unit} (S/)`:"Costo unitario (S/)";
+      setItemQuantityStep(field,selected?.name);
+    };
     itemField.addEventListener("change",update);
     update();
   }
@@ -43,30 +56,33 @@
   function reviewReceipt(r, approve) {
     const verb=approve?"Aprobar recepción":"Solicitar rechazo";
     const summary=[r.purchase_id?label("OC",r.purchase_id):r.code,r.supplier,
-      r.item_code,r.item_name,`${fmt(r.qty)} ${r.unit} previstos`].filter(Boolean).join(" · ");
-    const cost=r.unit_cents!=null?note(`Costo unitario ${money(r.unit_cents)}`):"";
-    const step=itemQuantityStep(r.item_name,r.qty);
-    const received=input("received",`Cantidad entregada (${r.unit})`,"number",r.qty,`required min="0" step="${step}"`);
-    const approval=approve?input("approved",`Cantidad en buen estado (${r.unit})`,"number",r.qty,
-      `required min="${step}" max="${e(r.qty)}" step="${step}"`)+
+      r.item_code,r.item_name,`${qtyText(r,r.qty)} previstos`].filter(Boolean).join(" · ");
+    const cost=r.unit_cents!=null?note(`Costo por ${r.unit} ${money(r.unit_cents)}`):"";
+    const unit=stockMeasure(r.item_name,r.unit).unit;
+    const value=stockInputValue(r.item_name,r.unit,r.qty);
+    const step=itemQuantityStep(r.item_name,value);
+    const received=input("received",`Cantidad entregada (${unit})`,"number",value,`required min="0" step="${step}"`);
+    const approval=approve?input("approved",`Cantidad en buen estado (${unit})`,"number",value,
+      `required min="${step}" max="${e(value)}" step="${step}"`)+
       input("expiry",r.perishable?"Vencimiento del lote aprobado":"Vencimiento, si corresponde","date","",r.perishable?"required":""):"";
     const dialog=modal(`${verb} · ${r.item_name}`,note(summary)+cost+received+approval+
       input("reason",approve?"Motivo si hay faltantes o unidades rechazadas":"Motivo del rechazo","text","",
         approve?"maxlength=500":"required maxlength=500")+
       note(approve?"Solo la cantidad aprobada ingresará al stock. Las diferencias quedarán como solicitudes pendientes.":
         "La solicitud quedará pendiente para que Administración gestione el rechazo con el proveedor."),
-      v=>run("gestion.receive",{id:r.id,received:v.received,approved:approve?v.approved:"0",expiry:v.expiry,reason:v.reason},
+      v=>run("gestion.receive",{id:r.id,received:stockQuantityPayload(r.item_name,r.unit,v.received),
+        approved:stockQuantityPayload(r.item_name,r.unit,approve?v.approved:"0"),expiry:v.expiry,reason:v.reason},
         approve?"Recepción aprobada · stock actualizado":"Solicitud de rechazo registrada"),verb);
     dialog.querySelector("form").addEventListener("input",event=>{
       const field=event.target;
       if(["received","approved"].includes(field.name)){
-        setItemQuantityStep(field,r.item_name,field.name==="received",r.qty);
+        setItemQuantityStep(field,r.item_name,field.name==="received",value);
       }
     });
   }
 
   function resolveIncident(x) {
-    modal("Resolver "+x.code,note(x.supplier+" · "+x.item_name+" · "+fmt(x.qty)+" "+x.unit+". "+x.reason)+
+    modal("Resolver "+x.code,note(x.supplier+" · "+x.item_name+" · "+qtyText(x,x.qty)+". "+x.reason)+
       input("resolution","Gestión con el proveedor","text","","required maxlength=500"),
       v=>run("gestion.resolve",{id:x.id,resolution:v.resolution},"Inconformidad resuelta"),"Resolver");
   }
@@ -74,9 +90,9 @@
   function receiptTable(deliveries) {
     return table(["Producto","Cantidad prevista","Revisión","Acciones"],deliveries.map(r=>[
       `<strong>${e(r.item_name)}</strong>`+sub([r.item_code,r.area,r.code,r.purchase_id?null:r.supplier].filter(Boolean).join(" · ")),
-      e(fmt(r.qty)+" "+r.unit),
-      badge(r.status)+(r.approved!==null?sub((r.received!=null?fmt(r.received)+" entregados · ":"")+
-        fmt(r.approved)+" "+r.unit+" aprobados")+sub(when(r.reviewed_at)+" · "+r.reviewer):""),
+      e(qtyText(r,r.qty)),
+      badge(r.status)+(r.approved!==null?sub((r.received!=null?qtyText(r,r.received)+" entregados · ":"")+
+        qtyText(r,r.approved)+" aprobados")+sub(when(r.reviewed_at)+" · "+r.reviewer):""),
       r.status==="Pendiente"?actions(
         button("Aprobar recepción",()=>reviewReceipt(r,true),"primary"),
         button("Solicitar rechazo",()=>reviewReceipt(r,false))
@@ -116,8 +132,8 @@
         button("Registrar entrega",newReceipt,"primary")),
       panel("Solicitudes de rechazo y diferencias",table(["Solicitud","Insumo y proveedor","Diferencia","Motivo y seguimiento","Estado"],issues.map(x=>[
         e(x.code)+sub(x.kind)+sub([x.purchase_id?label("OC",x.purchase_id):"",label("RC",x.receipt_id)].filter(Boolean).join(" · "))+
-        sub(when(x.created)+" · "+x.actor),e(x.item_name)+sub(x.supplier),e(fmt(x.qty)+" "+x.unit)+
-        (x.missing!=null?sub(fmt(x.missing)+" faltantes · "+fmt(x.rejected)+" rechazados"):""),e(x.reason)+
+        sub(when(x.created)+" · "+x.actor),e(x.item_name)+sub(x.supplier),e(qtyText(x,x.qty))+
+        (x.missing!=null?sub(qtyText(x,x.missing)+" faltantes · "+qtyText(x,x.rejected)+" rechazados"):""),e(x.reason)+
         (x.resolution?sub(x.resolution)+sub(when(x.closed)+" · "+x.closer):""),
         actions(badge(x.closed?"Resuelta":"Pendiente"),admin()&&!x.closed?button("Resolver solicitud",()=>resolveIncident(x)):"")
       ]),"Aún no se han registrado diferencias de recepción.")));
@@ -127,13 +143,13 @@
     const assigned=S.inventory_access_areas;
     const lots=rows("lots").filter(x=>{
       const i=item(x.item_id);
-      return i && x.available>=itemQuantityStep(i.name) && (admin() || assigned.includes(i.area));
+      return i && stockInputValue(i.name,i.unit,x.available)>=itemQuantityStep(i.name) && (admin() || assigned.includes(i.area));
     });
     if(!lots.length){
       toast("No hay lotes con existencias disponibles para reportar una merma.",true);
       return;
     }
-    const options=lots.map(x=>[x.id,`${label("LT",x.id)} · ${item(x.item_id).name} · ${fmt(x.available)} ${item(x.item_id).unit} disponibles`]);
+    const options=lots.map(x=>[x.id,`${label("LT",x.id)} · ${item(x.item_id).name} · ${qtyText(item(x.item_id),x.available)} disponibles`]);
     const calendarToday=S.calendar_today||S.today;
     const activeDay=S.today;
     const latestDate=calendarToday>activeDay?calendarToday:activeDay;
@@ -149,7 +165,9 @@
       v=>{
         const lot=lots.find(x=>x.id===Number(v.lot));
         if (!lot) throw Error("Selecciona un lote con existencias.");
-        return run("gestion.waste",{item_id:lot.item_id,lot_id:lot.id,qty:v.qty,occurred_on:v.occurred_on,reason:v.reason},"Merma reportada");
+        const selected=item(lot.item_id);
+        const qty=stockQuantityPayload(selected.name,selected.unit,v.qty);
+        return run("gestion.waste",{item_id:lot.item_id,lot_id:lot.id,qty,occurred_on:v.occurred_on,reason:v.reason},"Merma reportada");
       },"Enviar a revisión");
     const form=dialog.querySelector("form");
     const dateField=form.elements.namedItem("occurred_on");
@@ -161,8 +179,11 @@
     const quantityField=form.elements.namedItem("qty");
     const updateLimit=()=>{
       const lot=lots.find(x=>x.id===Number(lotField.value));
-      quantityField.max=lot.available;
-      setItemQuantityStep(quantityField,item(lot.item_id).name);
+      const selected=item(lot.item_id);
+      quantityField.max=stockInputValue(selected.name,selected.unit,lot.available);
+      quantityField.closest("label").querySelector("span").textContent=
+        `Cantidad afectada (${stockMeasure(selected.name,selected.unit).unit})`;
+      setItemQuantityStep(quantityField,selected.name);
     };
     lotField.addEventListener("change",updateLimit);
     updateLimit();
@@ -171,7 +192,7 @@
   function reviewWaste(x,approve) {
     const verb=approve?"Aprobar":"Rechazar";
     const effect=approve?"Se descontará la cantidad de la merma.":"Las reservas de esta merma se liberarán.";
-    confirmAction(verb+" "+x.code,fmt(x.qty)+" "+x.unit+" de "+x.item_name+". "+x.reason+". "+effect,
+    confirmAction(verb+" "+x.code,qtyText(x,x.qty)+" de "+x.item_name+". "+x.reason+". "+effect,
       "review_waste",{id:x.id,approve},verb,approve?"Merma aprobada":"Merma rechazada");
   }
 
@@ -179,7 +200,7 @@
     const data=rows("wastes");
     return panel("Reportes de merma",table(["Reporte","Lote e insumo","Cantidad","Motivo","Estado",""],data.map(x=>[
       e(x.code)+sub(date(x.occurred_on||x.created))+sub("Registro: "+when(x.created)),e(x.item_name)+sub(x.lot_id?label("LT",x.lot_id):x.area),
-      e(fmt(x.qty)+" "+x.unit),e(x.reason)+sub(x.actor),badge(x.status),
+      e(qtyText(x,x.qty)),e(x.reason)+sub(x.actor),badge(x.status),
       admin()&&x.status==="Pendiente"?actions(button("Aprobar",()=>reviewWaste(x,true)),button("Rechazar",()=>reviewWaste(x,false))):muted(x.reviewer)
     ]),"Aún no se han reportado mermas."),button("Reportar merma",newWaste,"primary"));
   };
@@ -201,11 +222,13 @@
     const lines = table(headers,options.map(x=>{
       const line=current.get(x.item_id);
       const n=x.item_id;
-      const step=itemQuantityStep(x.name,line?.qty);
-      return [e(x.name)+sub(x.unit),
-        ...(admin()?[badge(x.critical?"Crítico":"Normal")+sub(`${fmt(x.available)} disponibles · mínimo ${fmt(x.minimum)}`)]:[]),
-        `<input aria-label="Cantidad de ${e(x.name)}" name="q${n}" data-purchase-qty="${n}" type="number" min="0" step="${step}" value="${e(line?.qty||"")}" style="width:7em">`,
-        '<input aria-label="Costo de '+e(x.name)+'" name="c'+n+'" type="number" min="0" step="0.01" value="'+e(line?line.unit_cents/100:"")+'" style="width:7em">'];
+      const unit=stockMeasure(x.name,x.unit).unit;
+      const value=stockInputValue(x.name,x.unit,line?.qty);
+      const step=itemQuantityStep(x.name,value||null);
+      return [e(x.name)+sub(unit),
+        ...(admin()?[badge(x.critical?"Crítico":"Normal")+sub(`${qtyText(x,x.available)} disponibles · mínimo ${qtyText(x,x.minimum)}`)]:[]),
+        `<label><input aria-label="Cantidad de ${e(x.name)} (${e(unit)})" name="q${n}" data-purchase-qty="${n}" type="number" min="0" step="${step}" value="${e(value)}" style="width:7em"> ${e(unit)}</label>`,
+        `<label><input aria-label="Costo de ${e(x.name)} por ${e(x.unit)}" name="c${n}" type="number" min="0" step="0.01" value="${e(line?line.unit_cents/100:"")}" style="width:7em"> / ${e(x.unit)}</label>`];
     }),"Agrega insumos al inventario para preparar la compra.");
     const lotDay=p?purchaseDayOf(p):source?purchaseDayOf(source):day;
     const dialog=modal(p?"Editar "+p.code:source?"Ampliar "+source.code:"Nueva hoja de compra",
@@ -214,7 +237,7 @@
       '<div class="full">'+note("Completa la cantidad y el costo unitario de los insumos que deseas comprar.")+lines+'</div>',
       v=>{
         const details=options.filter(x=>Number(v["q"+x.item_id])>0).map(x=>({
-          item_id:x.item_id, qty:v["q"+x.item_id], unit_cents:cents(v["c"+x.item_id]||0)
+          item_id:x.item_id,qty:stockQuantityPayload(x.name,x.unit,v["q"+x.item_id]),unit_cents:cents(v["c"+x.item_id]||0)
         }));
         const payload={supplier:v.supplier,lines:details};
         if (admin()) payload.assignee_id=v.assignee_id;
@@ -223,18 +246,20 @@
         if (source) payload.source_purchase_id=source.id;
         return run(p?"gestion.edit_purchase":"gestion.purchase",payload,"Hoja de compra guardada");
       },"Guardar hoja");
-    const byId=new Map(options.map(option=>[option.item_id,option.name]));
+    const byId=new Map(options.map(option=>[option.item_id,option]));
     dialog.querySelector("form").addEventListener("input",event=>{
       const field=event.target;
       if(!field.dataset.purchaseQty)return;
       const id=Number(field.dataset.purchaseQty);
-      setItemQuantityStep(field,byId.get(id),true,current.get(id)?.qty);
+      const selected=byId.get(id);
+      const previous=stockInputValue(selected.name,selected.unit,current.get(id)?.qty);
+      setItemQuantityStep(field,selected.name,true,previous||null);
     });
   }
 
   function purchaseDetails(p) {
     const details=table(["Insumo","Cantidad","Costo unitario","Importe"],p.lines.map(l=>[
-      e(l.item_name),e(fmt(l.qty)+" "+l.unit),e(money(l.unit_cents)),e(money(l.total_cents))]),"Sin renglones.");
+      e(l.item_name),e(qtyText(l,l.qty)),e(money(l.unit_cents)+" / "+l.unit),e(money(l.total_cents))]),"Sin renglones.");
     modal("Detalle de "+p.code,'<div class="full">'+note((p.supplier||"Proveedor pendiente")+" · "+p.status)+
       details+note("Total "+money(p.total_cents))+
       actions(button("Exportar PDF",()=>printPurchases(purchaseDayOf(p),[p],p.code),"primary"),
@@ -244,9 +269,10 @@
   function downloadPurchase(p) {
     const sheet = [
       ["Orden","Fecha","Proveedor","Estado"],[p.code,when(p.created),p.supplier,p.status],[],
-      ["Insumo","Unidad","Cantidad","Precio unitario (S/)","Importe (S/)"],
-      ...p.lines.map(l=>[l.item_name,l.unit,l.qty,(l.unit_cents/100).toFixed(2),(l.total_cents/100).toFixed(2)]),
-      ["Total (S/)","","","",(p.total_cents/100).toFixed(2)]
+      ["Insumo","Unidad","Cantidad","Unidad de cotización","Precio unitario (S/)","Importe (S/)"],
+      ...p.lines.map(l=>[l.item_name,stockMeasure(l.item_name,l.unit).unit,stockInputValue(l.item_name,l.unit,l.qty),
+        l.unit,(l.unit_cents/100).toFixed(2),(l.total_cents/100).toFixed(2)]),
+      ["Total (S/)","","","","",(p.total_cents/100).toFixed(2)]
     ];
     exportCsv(p.code+".csv",sheet);
   }
@@ -259,8 +285,8 @@
     const orders=purchases.map(p=>`<section class="purchase-print-order">
       ${wholeLot?`<h2>Hoja ${e(p.code)}</h2>`:""}
       <p>${e(p.supplier||"Proveedor por definir")} · ${e(p.status)} · Revisión ${e(p.version)}</p>
-      ${table(["Insumo","Unidad","Cantidad","S/ por unidad","Importe"],p.lines.map(l=>[
-        e(l.item_name),e(l.unit),e(fmt(l.qty)),e(money(l.unit_cents)),e(money(l.total_cents)),
+      ${table(["Insumo","Cantidad","Precio unitario","Importe"],p.lines.map(l=>[
+        e(l.item_name),e(qtyText(l,l.qty)),e(money(l.unit_cents)+" / "+l.unit),e(money(l.total_cents)),
       ]),"Esta hoja no contiene insumos.")}
       ${purchases.length>1?`<p class="purchase-print-total">Subtotal <strong>${e(money(p.total_cents))}</strong></p>`:""}
     </section>`).join("");
@@ -322,7 +348,7 @@
 
   const reportSummary = r => {
     const items=table(["Insumo","Disponible","Mínimo","Compra sugerida"],r.lines.map(l=>[
-      e(l.item_name),e(fmt(l.available)+" "+l.unit),e(fmt(l.minimum)+" "+l.unit),e(fmt(l.suggested)+" "+l.unit)
+      e(l.item_name),e(qtyText(l,l.available)),e(qtyText(l,l.minimum)),e(qtyText(l,l.suggested))
     ]),"Todos los insumos superaban el mínimo en el momento del informe.");
     modal("Faltantes · "+r.code,'<div class="full">'+note(when(r.created)+" · Hora de Lima")+
       items+'</div>',null);
@@ -371,8 +397,11 @@
       '<div id="alert-expiry-fields">'+
       input("warn_days","Avisar antes del vencimiento (días)","number","","required min=0 max=3650 step=1")+
       '</div><p id="alert-expiry-preview" class="muted" aria-live="polite"></p>';
-    const dialog=modal("Configurar alertas",fields,
-      values=>run("gestion.configure_alerts",values,"Alertas del insumo actualizadas"),"Guardar alertas");
+    const dialog=modal("Configurar alertas",fields,values=>{
+      const selected=item(Number(values.item_id));
+      values.min_qty=stockQuantityPayload(selected.name,selected.unit,values.min_qty);
+      return run("gestion.configure_alerts",values,"Alertas del insumo actualizadas");
+    },"Guardar alertas");
     const form=dialog.querySelector("form");
     const itemField=form.elements.namedItem("item_id");
     const minimum=form.elements.namedItem("min_qty");
@@ -406,9 +435,11 @@
     function loadSettings() {
       const selected=item(Number(itemField.value));
       const source=item(selected.base_id)||selected;
-      minimum.value=selected.min_qty;
-      setItemQuantityStep(minimum,selected.name,true,selected.min_qty);
-      minimum.closest("label").querySelector("span").textContent=`Cantidad mínima crítica (${selected.unit})`;
+      minimum.value=stockInputValue(selected.name,selected.unit,selected.min_qty);
+      setItemQuantityStep(minimum,selected.name,true,minimum.value);
+      minimum.max=stockInputValue(selected.name,selected.unit,1000000);
+      minimum.closest("label").querySelector("span").textContent=
+        `Cantidad mínima crítica (${stockMeasure(selected.name,selected.unit).unit})`;
       days.value=source.warn_days;
       days.disabled=!source.perishable;
       expiryFields.hidden=days.disabled;
@@ -417,7 +448,7 @@
     itemField.addEventListener("change",loadSettings);
     minimum.addEventListener("input",()=>{
       const selected=item(Number(itemField.value));
-      setItemQuantityStep(minimum,selected.name,true,selected.min_qty);
+      setItemQuantityStep(minimum,selected.name,true,stockInputValue(selected.name,selected.unit,selected.min_qty));
     });
     days.addEventListener("input",updatePreview);
     loadSettings();
